@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "api",
+    "api/macros",
+    "common",
+    "function-executor",
+    "function-scheduler",
+    "test-function",
+]
+exclude = ["anna-rs"]
