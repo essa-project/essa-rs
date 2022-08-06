@@ -22,13 +22,16 @@ use essa_common::{
 };
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
-use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, Trap, ValType};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+use wasmedge_sys::{
+    Executor, FuncType, Function, ImportInstance, ImportModule, ImportObject, Instance, Loader,
+    Memory, Module, Store, Validator, WasmValue,
+};
+use wasmedge_types::{ExternalInstanceType, ValType};
 use zenoh::{
     prelude::{Receiver, Sample, SplitBuffer, ZFuture},
     query::ReplyReceiver,
@@ -213,8 +216,17 @@ impl FunctionExecutor {
         log::info!("Start running WASM module");
 
         // compile the WASM module
-        let engine = Engine::default();
-        let module = Module::new(&engine, &wasm_bytes).context("failed to load wasm module")?;
+        let loader = Loader::create(None).context("failed to create wasmedge loader")?;
+        let module = Arc::new(
+            loader
+                .from_bytes(&wasm_bytes)
+                .context("failed to load wasm module")?,
+        );
+
+        let validator = Validator::create(None).context("failed to create wasmedge validator")?;
+        validator
+            .validate(&module)
+            .context("failed to validate wasm module")?;
 
         // store the compiled module in the key-value store under an
         // unique key (to avoid recompiling the module on future function
@@ -222,40 +234,29 @@ impl FunctionExecutor {
         log::info!("Storing compiled wasm module in anna KVS");
         let module_key: ClientKey = Uuid::new_v4().to_string().into();
         let value = LastWriterWinsLattice::new_now(
-            module.serialize().context("failed to serialize module")?,
+            // TODO serialize the WasmEdge module into bytes
+            wasm_bytes,
         )
         .into();
         kvs_put(module_key.clone(), value, &mut self.anna)?;
 
-        let (mut store, linker) = set_up_module(
-            engine,
-            &module,
-            module_key,
-            vec![],
-            self.zenoh.clone(),
-            self.zenoh_prefix.clone(),
-            self.anna,
-        )?;
+        let mut host_state = HostState {
+            // wasi,
+            module: module.clone(),
+            module_key: module_key,
+            function_result: None,
+            next_result_handle: 1,
+            results: HashMap::new(),
+            result_receivers: HashMap::new(),
+            zenoh: self.zenoh.clone(),
+            zenoh_prefix: self.zenoh_prefix.clone(),
+            anna: self.anna,
+        };
 
-        // get the default function (i.e. the `main` function)
-        let default_func = linker
-            .get_default(&mut store, "")
-            .context("module has no default function")?
-            .typed::<(), (), _>(&store)
-            .context("default function has invalid type")?;
+        let mut instance_wrapper = InstanceWrapper::new()?;
+        instance_wrapper.register(&module, &mut host_state, vec![])?;
 
-        log::info!("Starting default function of wasm module");
-
-        // call the function
-        //
-        // TODO: wasmtime allows fine-grained control of the execution, e.g.
-        // periodic interrupts. We might want to use these features to guard
-        // against malicious or buggy user programs. For example, an infinite
-        // loop should not waste CPU time forever.
-        default_func
-            .call(&mut store, ())
-            .context("default function failed")?;
-
+        instance_wrapper.call_default()?;
         Ok(())
     }
 
@@ -305,29 +306,36 @@ impl FunctionExecutor {
         let args_len = u32::try_from(args.len()).unwrap();
 
         // deserialize and set up WASM module
-        let engine = Engine::default();
-        let module =
-            unsafe { Module::deserialize(&engine, module).expect("failed to deserialize module") };
-        let (mut store, linker) = set_up_module(
-            engine,
-            &module,
-            module_key,
-            args,
-            self.zenoh,
-            self.zenoh_prefix.clone(),
-            self.anna,
-        )?;
+        // TODO when related APIs are implemented
+        let loader = Loader::create(None).context("failed to create wasmedge loader")?;
+        let module = Arc::new(
+            loader
+                .from_bytes(&module)
+                .context("failed to load wasm module")?,
+        );
 
-        // get the function that we've been requested to call
-        let func = linker
-            .get(&mut store, "", Some(&function_name))
-            .and_then(|e| e.into_func())
-            .with_context(|| format!("module has no function `{}`", function_name))?
-            .typed::<(i32,), (), _>(&store)
-            .context("default function has invalid type")?;
+        let validator = Validator::create(None).context("failed to create wasmedge validator")?;
+        validator
+            .validate(&module)
+            .context("failed to validate wasm module")?;
 
-        func.call(&mut store, (args_len as i32,))
-            .context("function trapped")?;
+        let mut host_state = HostState {
+            // wasi,
+            module: module.clone(),
+            module_key: module_key,
+            function_result: None,
+            next_result_handle: 1,
+            results: HashMap::new(),
+            result_receivers: HashMap::new(),
+            zenoh: self.zenoh.clone(),
+            zenoh_prefix: self.zenoh_prefix.clone(),
+            anna: self.anna,
+        };
+
+        let mut instance_wrapper = InstanceWrapper::new()?;
+        instance_wrapper.register(&module, &mut host_state, args)?;
+
+        instance_wrapper.call(function_name, args_len as i32)?;
 
         // store the function's result into the key value store under
         // the requested key
@@ -336,7 +344,6 @@ impl FunctionExecutor {
         // send it as a message instead of storing it in the KVS. This would
         // also improve performance since the receiver would no longer need to
         // busy-wait on the result key in the KVS anymore.
-        let mut host_state = store.into_data();
         if let Some(result_value) = host_state.function_result.take() {
             let selector = query.key_selector().to_string();
             query.reply(Sample::new(selector, result_value));
@@ -373,232 +380,447 @@ fn kvs_get(key: ClientKey, anna: &mut ClientNode) -> anyhow::Result<LatticeValue
         .context("get failed")
 }
 
-/// Link the host functions and WASI abstractions into the WASM module.
-fn set_up_module(
-    engine: Engine,
-    module: &Module,
-    module_key: ClientKey,
-    args: Vec<u8>,
-    zenoh: Arc<zenoh::Session>,
-    zenoh_prefix: String,
-    anna: ClientNode,
-) -> Result<(Store<HostState>, Linker<HostState>), anyhow::Error> {
-    let wasi = WasiCtxBuilder::new()
-        // TODO: we probably want to write to a log file or an anna key instead
-        .inherit_stdout()
-        .inherit_stderr()
-        .build();
-    let mut store = Store::new(
-        &engine,
-        HostState {
-            wasi,
-            module: module.clone(),
-            module_key: module_key,
-            function_result: None,
-            next_result_handle: 1,
-            results: HashMap::new(),
-            result_receivers: HashMap::new(),
-            zenoh,
-            zenoh_prefix,
-            anna,
-        },
-    );
-    let mut linker = Linker::new(&engine);
+struct HostContext {
+    memory: *mut Option<Memory>,
+    host_state: *mut HostState,
+}
+unsafe impl Send for HostContext {}
 
-    // link in the essa host functions
-    linker
-        .func_wrap(
-            "host",
-            "essa_get_args",
-            move |mut caller: Caller<'_, HostState>, buf_ptr: u32, buf_len: u32| {
-                // the given buffer must be large enough to hold `args`
-                if buf_len < u32::try_from(args.len()).unwrap() {
-                    return Ok(EssaResult::BufferTooSmall as i32);
-                }
+struct InstanceWrapper {
+    executor: Executor,
+    store: Store,
+    instance: Option<Instance>,
+    memory: Option<Memory>,
+    import_obj: Option<ImportObject>,
+    wasi: Option<ImportObject>
+}
 
-                // write `args` to the given memory region in the sandbox
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return Err(Trap::new("failed to find host memory")),
-                };
-                mem.write(&mut caller, buf_ptr as usize, args.as_slice())
-                    .context("val ptr/len out of bounds")?;
+impl InstanceWrapper {
+    fn new() -> Result<Self, anyhow::Error> {
+        let executor =
+            Executor::create(None, None).context("failed to create wasmedge executor")?;
+        let store = Store::create().context("failed to create wasmedge store")?;
 
-                Ok(EssaResult::Ok as i32)
-            },
-        )
-        .context("failed to create essa_get_args")?;
-    linker
-        .func_wrap(
-            "host",
-            "essa_set_result",
-            |mut caller: Caller<'_, HostState>, buf_ptr: u32, buf_len: u32| {
-                // copy the given memory region out of the sandbox
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return Err(Trap::new("failed to find host memory")),
-                };
-                let mut buf = vec![0; buf_len as usize];
-                mem.read(&mut caller, buf_ptr as usize, &mut buf)
-                    .context("ptr/len out of bounds")?;
+        Ok(InstanceWrapper {
+            executor,
+            store,
+            instance: None,
+            memory: None,
+            import_obj: None,
+            wasi: None
+        })
+    }
 
-                // set the function result in the host state
-                caller.data_mut().function_result = Some(buf);
+    fn register(
+        &mut self,
+        module: &Module,
+        host_state: &mut HostState,
+        args: Vec<u8>,
+    ) -> Result<(), anyhow::Error> {
+        let mut import =
+            ImportModule::create("host").context("failed to create wasmedge import module")?;
 
-                Ok(EssaResult::Ok as i32)
-            },
-        )
-        .context("failed to create essa_set_result")?;
-    linker
-        .func_wrap(
-            "host",
-            "essa_call",
-            |caller: Caller<'_, HostState>,
-             function_name_ptr: u32,
-             function_name_len: u32,
-             serialized_args_ptr: u32,
-             serialized_arg_len: u32,
-             result_handle_ptr: u32| {
-                essa_call_wrapper(
-                    caller,
-                    function_name_ptr,
-                    function_name_len,
-                    serialized_args_ptr,
-                    serialized_arg_len,
-                    result_handle_ptr,
-                )
-                .map(|r| r as i32)
-            },
-        )
-        .context("failed to create essa_call host function")?;
-    linker
-        .func_wrap(
-            "host",
-            "essa_get_result_len",
-            |caller: Caller<'_, HostState>, handle: u32, value_len_ptr: u32| {
-                essa_get_result_len_wrapper(caller, handle, value_len_ptr).map(|r| r as i32)
-            },
-        )
-        .context("failed to create essa_get_result_len host function")?;
-    linker
-        .func_wrap(
-            "host",
-            "essa_get_result",
-            |caller: Caller<'_, HostState>,
-             handle: u32,
-             value_ptr: u32,
-             value_capacity: u32,
-             value_len_ptr: u32| {
-                essa_get_result_wrapper(caller, handle, value_ptr, value_capacity, value_len_ptr)
-                    .map(|r| r as i32)
-            },
-        )
-        .context("failed to create essa_get_result host function")?;
-    linker
-        .func_wrap(
-            "host",
-            "essa_put_lattice",
-            |caller: Caller<'_, HostState>,
-             key_ptr: u32,
-             key_len: u32,
-             value_ptr: u32,
-             value_len: u32| {
-                essa_put_lattice_wrapper(caller, key_ptr, key_len, value_ptr, value_len)
-                    .map(|r| r as i32)
-            },
-        )
-        .context("failed to create essa_put_lattice host function")?;
-    linker
-        .func_wrap(
-            "host",
-            "essa_get_lattice_len",
-            |caller: Caller<'_, HostState>, key_ptr: u32, key_len: u32, value_len_ptr: u32| {
-                essa_get_lattice_len_wrapper(caller, key_ptr, key_len, value_len_ptr)
-                    .map(|r| r as i32)
-            },
-        )
-        .context("failed to create essa_get_lattice host function")?;
-    linker
-        .func_wrap(
-            "host",
-            "essa_get_lattice_data",
-            |caller: Caller<'_, HostState>,
-             key_ptr: u32,
-             key_len: u32,
-             value_ptr: u32,
-             value_capacity: u32,
-             value_len_ptr: u32| {
-                essa_get_lattice_data_wrapper(
-                    caller,
-                    key_ptr,
-                    key_len,
-                    value_ptr,
-                    value_capacity,
-                    value_len_ptr,
-                )
-                .map(|r| r as i32)
-            },
-        )
-        .context("failed to create essa_get_lattice_data host function")?;
+        // essa_get_args
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let buf_ptr = inputs[0].to_i32() as u32;
+            let buf_len = inputs[1].to_i32() as u32;
 
-    // add WASI functionality (e.g. stdin/stdout access)
-    wasmtime_wasi::add_to_linker(&mut linker, |state: &mut HostState| &mut state.wasi)
-        .context("failed to add wasi functionality to linker")?;
+            // the given buffer must be large enough to hold `args`
+            if buf_len < u32::try_from(args.len()).unwrap() {
+                return Ok(vec![WasmValue::from_i32(EssaResult::BufferTooSmall as i32)]);
+            }
 
-    // link the host and WASI functions with the user-supplied WASM module
-    linker
-        .module(&mut store, "", &module)
-        .context("failed to add module to linker")?;
+            // write `args` to the given memory region in the sandbox
+            let mem = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            write_memory(mem, buf_ptr as usize, args.as_slice()).unwrap();
 
-    Ok((store, linker))
+            Ok(vec![WasmValue::from_i32(EssaResult::Ok as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 2], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_get_args", func);
+
+        // essa_set_result
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let buf_ptr = inputs[0].to_i32() as u32;
+            let buf_len = inputs[1].to_i32() as u32;
+
+            // copy the given memory region out of the sandbox
+            let mem = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            let mut buf = vec![0; buf_len as usize];
+            read_memory(mem, buf_ptr as usize, &mut buf).unwrap();
+
+            let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
+            host_state.function_result = Some(buf);
+
+            Ok(vec![WasmValue::from_i32(EssaResult::Ok as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 2], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_set_result", func);
+
+        // essa_call
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let function_name_ptr = inputs[0].to_i32() as u32;
+            let function_name_len = inputs[1].to_i32() as u32;
+            let serialized_args_ptr = inputs[2].to_i32() as u32;
+            let serialized_arg_len = inputs[3].to_i32() as u32;
+            let result_handle_ptr = inputs[4].to_i32() as u32;
+
+            let memory = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
+
+            let res = essa_call_wrapper(
+                memory,
+                host_state,
+                function_name_ptr,
+                function_name_len,
+                serialized_args_ptr,
+                serialized_arg_len,
+                result_handle_ptr,
+            )
+            .unwrap();
+
+            Ok(vec![WasmValue::from_i32(res as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 5], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_call", func);
+
+        // essa_get_result_len
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let handle = inputs[0].to_i32() as u32;
+            let value_len_ptr = inputs[1].to_i32() as u32;
+
+            let memory = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
+
+            let res =
+                essa_get_result_len_wrapper(memory, host_state, handle, value_len_ptr).unwrap();
+
+            Ok(vec![WasmValue::from_i32(res as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 2], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_get_result_len", func);
+
+        // essa_get_result
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let handle = inputs[0].to_i32() as u32;
+            let value_ptr = inputs[1].to_i32() as u32;
+            let value_capacity = inputs[2].to_i32() as u32;
+            let value_len_ptr = inputs[3].to_i32() as u32;
+
+            let memory = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
+
+            let res = essa_get_result_wrapper(
+                memory,
+                host_state,
+                handle,
+                value_ptr,
+                value_capacity,
+                value_len_ptr,
+            )
+            .unwrap();
+
+            Ok(vec![WasmValue::from_i32(res as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 4], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_get_result", func);
+
+        // essa_put_lattice
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let key_ptr = inputs[0].to_i32() as u32;
+            let key_len = inputs[1].to_i32() as u32;
+            let value_ptr = inputs[2].to_i32() as u32;
+            let value_len = inputs[3].to_i32() as u32;
+
+            let memory = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
+
+            let res = essa_put_lattice_wrapper(
+                memory, host_state, key_ptr, key_len, value_ptr, value_len,
+            )
+            .unwrap();
+
+            Ok(vec![WasmValue::from_i32(res as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 4], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_put_lattice", func);
+
+        // essa_get_lattice_len
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let key_ptr = inputs[0].to_i32() as u32;
+            let key_len = inputs[1].to_i32() as u32;
+            let value_len_ptr = inputs[2].to_i32() as u32;
+
+            let memory = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
+
+            let res =
+                essa_get_lattice_len_wrapper(memory, host_state, key_ptr, key_len, value_len_ptr)
+                    .unwrap();
+
+            Ok(vec![WasmValue::from_i32(res as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 3], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_get_lattice_len", func);
+
+        // essa_get_lattice_data
+        let host_context = Arc::new(Mutex::new(HostContext {
+            memory: &mut self.memory as *mut Option<Memory>,
+            host_state: host_state as *mut HostState,
+        }));
+        let func_closure = move |inputs: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> {
+            let key_ptr = inputs[0].to_i32() as u32;
+            let key_len = inputs[1].to_i32() as u32;
+            let value_ptr = inputs[2].to_i32() as u32;
+            let value_capacity = inputs[3].to_i32() as u32;
+            let value_len_ptr = inputs[4].to_i32() as u32;
+
+            let memory = unsafe { &mut *(host_context.lock().unwrap().memory) }
+                .as_mut()
+                .unwrap();
+            let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
+
+            let res = essa_get_lattice_data_wrapper(
+                memory,
+                host_state,
+                key_ptr,
+                key_len,
+                value_ptr,
+                value_capacity,
+                value_len_ptr,
+            )
+            .unwrap();
+
+            Ok(vec![WasmValue::from_i32(res as i32)])
+        };
+        let func_ty = FuncType::create(vec![ValType::I32; 5], vec![ValType::I32])
+            .context("failed to create wasmedge func type")?;
+        let func = Function::create_single_thread(&func_ty, Box::new(func_closure), 0)
+            .context("failed to create wasmedge function")?;
+        import.add_func("essa_get_lattice_data", func);
+
+        self.import_obj = Some(ImportObject::Import(import));
+        self.executor
+            .register_import_object(&mut self.store, &self.import_obj.as_ref().unwrap())
+            .context("failed to register and instantiate a wasmedge import object into a store")?;
+
+        let wasi = wasmedge_sys::WasiModule::create(None, None, None).unwrap();
+        self.wasi = Some(ImportObject::Wasi(wasi));
+        self.executor
+            .register_import_object(&mut self.store, &self.wasi.as_ref().unwrap())
+            .context("failed to register and instantiate a wasmedge import object into a store")?;
+        
+        self.instance = Some(
+            self.executor
+                .register_active_module(&mut self.store, module)
+                .context("failed to register and instantiate a wasmedge module into a store as an anonymous module")?
+        );
+        self.memory = Some(
+            self.instance
+                .as_ref()
+                .unwrap()
+                .get_memory("memory")
+                .context("failed to find host memory")?,
+        );
+
+        Ok(())
+    }
+
+    fn call_default(&mut self) -> Result<(), anyhow::Error> {
+        let func = get_default(self.get_instance()?).context("module has no default function")?;
+
+        let func_ty = func.ty().context("failed to get the function type")?;
+
+        // Check the signature of the default function
+        if func_ty.params_len() != 0 || func_ty.returns_len() != 0 {
+            return Err(anyhow::anyhow!("the default function has invalid type"));
+        }
+
+        log::info!("Starting default function of wasm module");
+        
+        func.call(&mut self.executor, [])
+            .context("default function failed")?;
+
+        Ok(())
+    }
+
+    fn call(&mut self, name: &str, args: i32) -> Result<(), anyhow::Error> {
+        // get the function that we've been requested to call
+        let func = self
+            .get_instance()?
+            .get_func(name)
+            .with_context(|| format!("module has no function `{}`", name))?;
+
+        let func_ty = func.ty().context("failed to get the function type")?;
+
+        // Check the signature of the function
+        if func_ty.params_type_iter().collect::<Vec<ValType>>() != vec![ValType::I32]
+            || func_ty.returns_len() != 0
+        {
+            return Err(anyhow::anyhow!(format!(
+                "the function `{}` has invalid type",
+                name
+            )));
+        }
+
+        func.call(&mut self.executor, vec![WasmValue::from_i32(args)])
+            .context("function trapped")?;
+
+        Ok(())
+    }
+
+    fn get_instance(&self) -> Result<&Instance, anyhow::Error> {
+        self.instance
+            .as_ref()
+            .ok_or(anyhow::anyhow!("module has not been instantiated"))
+    }
+}
+
+/// Returns the "default export" of a WASM instance.
+fn get_default(instance: &Instance) -> Result<Function, anyhow::Error> {
+    if let Ok(func) = instance.get_func("") {
+        return Ok(func);
+    }
+
+    // For compatibility, also recognize "_start".
+    if let Ok(func) = instance.get_func("_start") {
+        return Ok(func);
+    }
+
+    // Otherwise return a no-op function.
+    let func = |_: Vec<WasmValue>| -> Result<Vec<WasmValue>, u8> { Ok(vec![]) };
+    let func_ty = FuncType::create([], []).context("failed to create wasmedge func type")?;
+    Function::create_single_thread(&func_ty, Box::new(func), 0).context("failed to create wasmedge function")
+}
+
+// Read memory contents at the given offset into a buffer.
+fn read_memory(memory: &Memory, offset: usize, buffer: &mut [u8]) -> Result<(), anyhow::Error> {
+    let base_ptr: *const u8 = memory
+        .data_pointer(0, 1)
+        .expect("failed to returns the const data pointer to the memory.");
+
+    let slice =
+        unsafe { std::slice::from_raw_parts(base_ptr, (memory.size() * 64 * 1024) as usize) }
+            .get(offset..)
+            .and_then(|s| s.get(..buffer.len()))
+            .unwrap();
+    buffer.copy_from_slice(slice);
+    Ok(())
+}
+
+// Write contents of a buffer to this memory at the given offset.
+fn write_memory(memory: &mut Memory, offset: usize, buffer: &[u8]) -> Result<(), anyhow::Error> {
+    let base_ptr_mut: *mut u8 = memory
+        .data_pointer_mut(0, 1)
+        .expect("failed to returns the mut data pointer to the memory.");
+
+    unsafe { std::slice::from_raw_parts_mut(base_ptr_mut, (memory.size() * 64 * 1024) as usize) }
+        .get_mut(offset..)
+        .and_then(|s| s.get_mut(..buffer.len()))
+        .unwrap()
+        .copy_from_slice(buffer);
+
+    Ok(())
 }
 
 /// Host function for calling the specified function on a remote node.
 fn essa_call_wrapper(
-    mut caller: Caller<HostState>,
+    memory: &mut Memory,
+    host_state: &mut HostState,
     function_name_ptr: u32,
     function_name_len: u32,
     serialized_args_ptr: u32,
     serialized_args_len: u32,
     result_handle_ptr: u32,
-) -> Result<EssaResult, Trap> {
-    // Use our `caller` context to get the memory export of the
-    // module which called this host function.
-    let mem = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
-    };
-
+) -> Result<EssaResult, anyhow::Error> {
     // read the function name from the WASM sandbox
     let function_name = {
         let mut data = vec![0u8; function_name_len as usize];
-        mem.read(&caller, function_name_ptr as usize, &mut data)
+        read_memory(memory, function_name_ptr as usize, &mut data)
             .context("function name ptr/len out of bounds")?;
         String::from_utf8(data).context("function name not valid utf8")?
     };
     // read the serialized function arguments from the WASM sandbox
     let args = {
         let mut data = vec![0u8; serialized_args_len as usize];
-        mem.read(&caller, serialized_args_ptr as usize, &mut data)
+        read_memory(memory, serialized_args_ptr as usize, &mut data)
             .context("function name ptr/len out of bounds")?;
         data
     };
 
     // trigger the external function call
-    match caller.data_mut().essa_call(function_name, args) {
+    match host_state.essa_call(function_name, args) {
         Ok(reply) => {
-            let host_state = caller.data_mut();
             let handle = host_state.next_result_handle;
             host_state.next_result_handle += 1;
             host_state.result_receivers.insert(handle, reply);
 
             // write handle
-            mem.write(
-                &mut caller,
-                result_handle_ptr as usize,
-                &handle.to_le_bytes(),
-            )
-            .context("result_handle_ptr out of bounds")?;
+            write_memory(memory, result_handle_ptr as usize, &handle.to_le_bytes())
+                .context("result_handle_ptr out of bounds")?;
 
             Ok(EssaResult::Ok)
         }
@@ -607,19 +829,13 @@ fn essa_call_wrapper(
 }
 
 fn essa_get_result_len_wrapper(
-    mut caller: Caller<HostState>,
+    memory: &mut Memory,
+    host_state: &mut HostState,
     handle: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
-    // Use our `caller` context to learn about the memory export of the
-    // module which called this host function.
-    let mem = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
-    };
-
+) -> Result<EssaResult, anyhow::Error> {
     // get the corresponding value from the KVS
-    match caller.data_mut().get_result(handle) {
+    match host_state.get_result(handle) {
         Ok(value) => {
             let len = value.len();
             // write the length of the value into the sandbox
@@ -627,8 +843,8 @@ fn essa_get_result_len_wrapper(
             // We cannot write the value directly because the WASM module
             // needs to allocate some space for the (dynamically-sized) value
             // first.
-            mem.write(
-                &mut caller,
+            write_memory(
+                memory,
                 val_len_ptr as usize,
                 &u32::try_from(len).unwrap().to_le_bytes(),
             )
@@ -641,37 +857,31 @@ fn essa_get_result_len_wrapper(
 }
 
 fn essa_get_result_wrapper(
-    mut caller: Caller<HostState>,
+    memory: &mut Memory,
+    host_state: &mut HostState,
     handle: u32,
     val_ptr: u32,
     val_capacity: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
-    // Use our `caller` context to learn about the memory export of the
-    // module which called this host function.
-    let mem = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
-    };
-
+) -> Result<EssaResult, anyhow::Error> {
     // get the corresponding value from the KVS
-    match caller.data_mut().get_result(handle) {
+    match host_state.get_result(handle) {
         Ok(value) => {
             if value.len() > val_capacity as usize {
                 Ok(EssaResult::BufferTooSmall)
             } else {
                 // write the value into the sandbox
-                mem.write(&mut caller, val_ptr as usize, &value)
+                write_memory(memory, val_ptr as usize, &value)
                     .context("val ptr/len out of bounds")?;
                 // write the length of the value
-                mem.write(
-                    &mut caller,
+                write_memory(
+                    memory,
                     val_len_ptr as usize,
                     &u32::try_from(value.len()).unwrap().to_le_bytes(),
                 )
                 .context("val_len_ptr out of bounds")?;
 
-                caller.data_mut().remove_result(handle);
+                host_state.remove_result(handle);
 
                 Ok(EssaResult::Ok)
             }
@@ -682,23 +892,17 @@ fn essa_get_result_wrapper(
 
 /// Host function for storing a given lattice value into the KVS.
 fn essa_put_lattice_wrapper(
-    mut caller: Caller<HostState>,
+    memory: &mut Memory,
+    host_state: &mut HostState,
     key_ptr: u32,
     key_len: u32,
     value_ptr: u32,
     value_len: u32,
-) -> Result<EssaResult, Trap> {
-    // Use our `caller` context to learn about the memory export of the
-    // module which called this host function.
-    let mem = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
-    };
+) -> Result<EssaResult, anyhow::Error> {
     // read out and parse the KVS key
     let key = {
         let mut data = vec![0u8; key_len as usize];
-        mem.read(&caller, key_ptr as usize, &mut data)
-            .context("key ptr/len out of bounds")?;
+        read_memory(memory, key_ptr as usize, &mut data).context("key ptr/len out of bounds")?;
         String::from_utf8(data)
             .context("key is not valid utf8")?
             .into()
@@ -706,12 +910,12 @@ fn essa_put_lattice_wrapper(
     // read out the value that should be stored
     let value = {
         let mut data = vec![0u8; value_len as usize];
-        mem.read(&caller, value_ptr as usize, &mut data)
+        read_memory(memory, value_ptr as usize, &mut data)
             .context("value ptr/len out of bounds")?;
         data
     };
 
-    match caller.data_mut().put_lattice(&key, &value) {
+    match host_state.put_lattice(&key, &value) {
         Ok(()) => Ok(EssaResult::Ok),
         Err(other) => Ok(other),
     }
@@ -720,36 +924,30 @@ fn essa_put_lattice_wrapper(
 /// Host function for reading the length of value stored under a specific key
 /// in the KVS.
 fn essa_get_lattice_len_wrapper(
-    mut caller: Caller<HostState>,
+    memory: &mut Memory,
+    host_state: &mut HostState,
     key_ptr: u32,
     key_len: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
-    // Use our `caller` context to learn about the memory export of the
-    // module which called this host function.
-    let mem = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
-    };
+) -> Result<EssaResult, anyhow::Error> {
     // read out and parse the KVS key
     let key = {
         let mut data = vec![0u8; key_len as usize];
-        mem.read(&caller, key_ptr as usize, &mut data)
-            .context("key ptr/len out of bounds")?;
+        read_memory(memory, key_ptr as usize, &mut data).context("key ptr/len out of bounds")?;
         String::from_utf8(data)
             .context("key is not valid utf8")?
             .into()
     };
     // get the corresponding value from the KVS
-    match caller.data_mut().get_lattice(&key) {
+    match host_state.get_lattice(&key) {
         Ok(value) => {
             // write the length of the value into the sandbox
             //
             // We cannot write the value directly because the WASM module
             // needs to allocate some space for the (dynamically-sized) value
             // first.
-            mem.write(
-                &mut caller,
+            write_memory(
+                memory,
                 val_len_ptr as usize,
                 &u32::try_from(value.len()).unwrap().to_le_bytes(),
             )
@@ -763,40 +961,34 @@ fn essa_get_lattice_len_wrapper(
 
 /// Host function for reading a specific value from the KVS.
 fn essa_get_lattice_data_wrapper(
-    mut caller: Caller<HostState>,
+    memory: &mut Memory,
+    host_state: &mut HostState,
     key_ptr: u32,
     key_len: u32,
     val_ptr: u32,
     val_capacity: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
-    // Use our `caller` context to learn about the memory export of the
-    // module which called this host function.
-    let mem = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
-    };
+) -> Result<EssaResult, anyhow::Error> {
     // read out and parse the KVS key
     let key = {
         let mut data = vec![0u8; key_len as usize];
-        mem.read(&caller, key_ptr as usize, &mut data)
-            .context("key ptr/len out of bounds")?;
+        read_memory(memory, key_ptr as usize, &mut data).context("key ptr/len out of bounds")?;
         String::from_utf8(data)
             .context("key is not valid utf8")?
             .into()
     };
     // get the corresponding value from the KVS
-    match caller.data_mut().get_lattice(&key) {
+    match host_state.get_lattice(&key) {
         Ok(value) => {
             if value.len() > val_capacity as usize {
                 Ok(EssaResult::BufferTooSmall)
             } else {
                 // write the value into the sandbox
-                mem.write(&mut caller, val_ptr as usize, value.as_slice())
+                write_memory(memory, val_ptr as usize, value.as_slice())
                     .context("val ptr/len out of bounds")?;
                 // write the length of the value
-                mem.write(
-                    &mut caller,
+                write_memory(
+                    memory,
                     val_len_ptr as usize,
                     &u32::try_from(value.len()).unwrap().to_le_bytes(),
                 )
@@ -810,14 +1002,10 @@ fn essa_get_lattice_data_wrapper(
 }
 
 /// Stores all the information needed during execution.
-///
-/// The `wasmtime` crate gives this struct as an additional argument to all
-/// host functions, which makes it possible to keep state between across
-/// host function invocations.
 struct HostState {
-    wasi: WasiCtx,
+    // wasi: WasiCtx,
     /// The compiled WASM module.
-    module: Module,
+    module: Arc<Module>,
     /// The KVS key under which a serialized version of the compiled WASM
     /// module is stored.
     module_key: ClientKey,
@@ -845,14 +1033,19 @@ impl HostState {
         // get the requested function and check its signature
         let func = self
             .module
-            .get_export(&function_name)
-            .and_then(|e| e.func().cloned())
-            .ok_or(EssaResult::NoSuchFunction)?;
-        if func.params().collect::<Vec<_>>().as_slice() != &[ValType::I32]
-            || !func.results().collect::<Vec<_>>().as_slice().is_empty()
-        {
-            return Err(EssaResult::InvalidFunctionSignature);
-        }
+            .exports()
+            .into_iter()
+            .find(|x| x.name() == function_name)
+            .ok_or(EssaResult::NoSuchFunction)?
+            .ty()
+            .map_err(|_| EssaResult::NoSuchFunction)?;
+        if let ExternalInstanceType::Func(func_type) = func {
+            if func_type.args() != Some(&[ValType::I32]) || func_type.returns_len() != 0 {
+                return Err(EssaResult::InvalidFunctionSignature);
+            };
+        } else {
+            return Err(EssaResult::NoSuchFunction);
+        };
 
         // store args in kvs
         let args_key: ClientKey = Uuid::new_v4().to_string().into();
