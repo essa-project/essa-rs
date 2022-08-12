@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    name: "Test"
+  test_wasmedge:
+    name: "Test (wasmedge)"
 
     # The type of runner that the job will run on
     runs-on: ubuntu-latest
@@ -32,4 +32,32 @@ jobs:
 
       - name: "Test Rust code"
         run: cargo test --workspace --exclude essa-test-function
+        timeout-minutes: 10
+
+  test_wasmtime:
+    name: "Test (wasmtime)"
+
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - name: "Check Rust code"
+        run: cargo check --workspace --no-default-features --features wasmtime_executor
+
+      - name: "Run cargo clippy"
+        run: cargo clippy --workspace --no-default-features --features wasmtime_executor
+
+      - name: "Build Rust code"
+        run: cargo build --workspace --exclude essa-test-function --no-default-features --features wasmtime_executor
+
+      - name: "Build test-function"
+        run: cargo build --release -p essa-test-function --target wasm32-wasi
+
+      - name: "Test Rust code"
+        run: cargo test --workspace --exclude essa-test-function --no-default-features --features wasmtime_executor
         timeout-minutes: 10
