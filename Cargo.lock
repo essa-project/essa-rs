@@ -991,6 +991,8 @@ dependencies = [
  "wasmedge-sdk",
  "wasmedge-sys",
  "wasmedge-types",
+ "wasmtime",
+ "wasmtime-wasi",
  "zenoh",
 ]
 
