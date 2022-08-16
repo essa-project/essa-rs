@@ -9,6 +9,7 @@
 
 use anna::{
     anna_default_zenoh_prefix,
+    lattice::Lattice,
     nodes::{request_cluster_info, ClientNode},
     store::LatticeValue,
     topics::RoutingThread,
@@ -26,7 +27,14 @@ use std::{
 use uuid::Uuid;
 use zenoh::prelude::{Receiver, SplitBuffer, ZFuture};
 
-#[cfg(not(feature = "wasmtime_executor"))]
+#[cfg(all(feature = "wasmedge_executor", feature = "wasmtime_executor"))]
+compile_error!(
+    "Both `wasmedge_executor` and `wasmtime_executor` features are enabled, but \
+    only one WASM runtime is supported at a time"
+);
+#[cfg(all(not(feature = "wasmedge_executor"), not(feature = "wasmtime_executor")))]
+compile_error!("Either the `wasmedge_executor` or the `wasmtime_executor` feature must be enabled");
+#[cfg(feature = "wasmedge_executor")]
 mod wasmedge;
 #[cfg(feature = "wasmtime_executor")]
 mod wasmtime;
@@ -102,7 +110,7 @@ fn new_anna_client(zenoh: Arc<zenoh::Session>) -> Result<ClientNode, anyhow::Err
     let mut anna = ClientNode::new(
         Uuid::new_v4().to_string(),
         0,
-        routing_threads.clone(),
+        routing_threads,
         Duration::from_secs(10),
         zenoh,
         anna_zenoh_prefix,
@@ -226,6 +234,41 @@ fn kvs_get(key: ClientKey, anna: &mut ClientNode) -> anyhow::Result<LatticeValue
     smol::block_on(anna.get(key))
         .map_err(eyre_to_anyhow)
         .context("get failed")
+}
+
+// Get the function arguments from the key-value store
+//
+// TODO: we only need them once, so it might make more sense to pass
+// them directly in the message
+fn get_args(args_key: ClientKey, anna: &mut ClientNode) -> Result<Vec<u8>, anyhow::Error> {
+    let mut retries = 0;
+    let value = loop {
+        match kvs_get(args_key.clone(), anna).context("failed to get args from kvs") {
+            Ok(value) => break value,
+            Err(_) if retries < 5 => {
+                retries += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    };
+
+    Ok(value
+        .into_lww()
+        .map_err(eyre_to_anyhow)
+        .context("args is not a LWW lattice")?
+        .into_revealed()
+        .into_value())
+}
+
+/// Get the compiled WASM module from the key-value store
+fn get_module(module_key: ClientKey, anna: &mut ClientNode) -> Result<Vec<u8>, anyhow::Error> {
+    Ok(kvs_get(module_key, anna)
+        .context("failed to get module from kvs")?
+        .into_lww()
+        .map_err(eyre_to_anyhow)
+        .context("module is not a LWW lattice")?
+        .into_revealed()
+        .into_value())
 }
 
 /// Copy of `essa-api::EssaResult`, must be kept in sync.

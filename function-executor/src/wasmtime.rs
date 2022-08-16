@@ -2,12 +2,8 @@
 
 #![warn(missing_docs)]
 
-use crate::{eyre_to_anyhow, kvs_get, kvs_put, EssaResult, FunctionExecutor};
-use anna::{
-    lattice::{LastWriterWinsLattice, Lattice},
-    nodes::ClientNode,
-    ClientKey,
-};
+use crate::{get_args, get_module, kvs_get, kvs_put, EssaResult, FunctionExecutor};
+use anna::{lattice::LastWriterWinsLattice, nodes::ClientNode, ClientKey};
 use anyhow::Context;
 use essa_common::scheduler_function_call_topic;
 use std::{collections::HashMap, sync::Arc};
@@ -82,39 +78,9 @@ impl FunctionExecutor {
         let module_key =
             ClientKey::from(topic_split.next_back().context("no module key in topic")?);
 
-        // get the compiled WASM module from the key-value store
-        let module = kvs_get(module_key.clone(), &mut self.anna)
-            .context("failed to get module from kvs")?
-            .into_lww()
-            .map_err(eyre_to_anyhow)
-            .context("module is not a LWW lattice")?
-            .into_revealed()
-            .into_value();
-        // get the function arguments from the key-value store
-        //
-        // TODO: we only need them once, so it might make more sense to pass
-        // them directly in the message
-        let args = {
-            let mut retries = 0;
-            let value = loop {
-                match kvs_get(args_key.clone(), &mut self.anna)
-                    .context("failed to get args from kvs")
-                {
-                    Ok(value) => break value,
-                    Err(_) if retries < 5 => {
-                        retries += 1;
-                    }
-                    Err(err) => return Err(err),
-                }
-            };
-            value
-                .into_lww()
-                .map_err(eyre_to_anyhow)
-                .context("args is not a LWW lattice")?
-                .into_revealed()
-                .into_value()
-        };
+        let module = get_module(module_key.clone(), &mut self.anna)?;
 
+        let args = get_args(args_key, &mut self.anna)?;
         let args_len = u32::try_from(args.len()).unwrap();
 
         // deserialize and set up WASM module

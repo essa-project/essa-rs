@@ -14,7 +14,7 @@ This project was heavily insprired by **[`cloudburst`](https://github.com/hydro-
 
 This project contains several executables:
 
-- **`essa-function-executor`**: Allows to compile and execute a WebAssembly module and its functions. We use [`WasmEdge`](https://github.com/WasmEdge/WasmEdge) as the default executor. By opening the feature `wasmtime_executor`, we can use [`wasmtime`](https://github.com/bytecodealliance/wasmtime) as the executor.
+- **`essa-function-executor`**: Allows to compile and execute a WebAssembly module and its functions. We use [`WasmEdge`](https://github.com/WasmEdge/WasmEdge) as the default executor. By enabling the feature `wasmtime_executor`, we can use [`wasmtime`](https://github.com/bytecodealliance/wasmtime) as the executor.
 - **`essa-function-scheduler`**: Schedules function execution requests to function executors.
 - **`essa-test-function`:** A WebAssembly module that can be run in `essa`. It shows how to perform function calls across nodes and how to share state between them.
 - **`run-function`**: Helper executable to start a given WebAssembly module by passing it to a function scheduler.
@@ -71,7 +71,7 @@ For a **manual run**, execute the following commands in different terminal windo
   - Use [`wasmtime`](https://github.com/bytecodealliance/wasmtime) as the executor:
 
   ```
-  cargo run --features wasmtime_executor --release -p essa-function-executor -- 0
+  cargo run --no-default-features --features wasmtime_executor --release -p essa-function-executor -- 0
   ```
 - Compile the `essa-test-function` to WASM and start it through the `run-function` executable:
 
