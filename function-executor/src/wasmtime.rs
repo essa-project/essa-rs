@@ -99,7 +99,7 @@ impl FunctionExecutor {
 
         // get the function that we've been requested to call
         let func = linker
-            .get(&mut store, "", Some(function_name))
+            .get(&mut store, "", function_name)
             .and_then(|e| e.into_func())
             .with_context(|| format!("module has no function `{}`", function_name))?
             .typed::<(i32,), (), _>(&store)
