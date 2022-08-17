@@ -5,7 +5,7 @@ Essa is an experimental stateful serverless programming framework based on WebAs
 This project was heavily insprired by **[`cloudburst`](https://github.com/hydro-project/cloudburst)**, which provides a "low-latency, stateful serverless programming framework". Essa differs from the original project in multiple ways:
 
 - **WebAssembly functions:** Instead of requiring that the user-provided functions are written in Python, we use the [_WebAssembly_](https://webassembly.org/) format. WebAssembly — or _"Wasm"_ for short — is a portable instruction format that aims to be as fast as native code, while being completely sandboxed. Multiple programming languages such as C/C++, Rust, Go, or C# can be compiled to it already. These properties make Wasm very suitable for running untrusted user functions in a serverless framework.
-- **Written in Rust:** While the original `cloudburst` is written in Python, we rely on the [Rust](https://www.rust-lang.org/) programming language. In addition to Rust's memory safety guarantees and high performance, this choice has the advantage that we can easily use the [`wasmtime`](https://github.com/bytecodealliance/wasmtime) crate for running [_WASI_](https://wasi.dev/)-compatible WebAssembly functions.
+- **Written in Rust:** While the original `cloudburst` is written in Python, we rely on the [Rust](https://www.rust-lang.org/) programming language. In addition to Rust's memory safety guarantees and high performance, this choice has the advantage that we can easily use the [`wasmedge-sdk`](https://github.com/WasmEdge/WasmEdge/tree/master/bindings/rust/wasmedge-sdk) or the [`wasmtime`](https://github.com/bytecodealliance/wasmtime) crate for running [_WASI_](https://wasi.dev/)-compatible WebAssembly functions.
 - **Based on our `anna-rs` project:** The original `cloudburst` project uses the [`anna` key-value store](https://github.com/hydro-project/anna) for storing function state. While we follow that design, we instead use [our `anna-rs` port](https://github.com/essa-project/anna-rs), which is written in Rust instead of C++ and communicates using [`zenoh`](https://zenoh.io/) instead of [`ZeroMQ`](https://zeromq.org/).
 
 **Note:** This project is still in a prototype state, so don't use it in production!
@@ -14,7 +14,7 @@ This project was heavily insprired by **[`cloudburst`](https://github.com/hydro-
 
 This project contains several executables:
 
-- **`essa-function-executor`**: Allows to compile and execute a WebAssembly module and its functions.
+- **`essa-function-executor`**: Allows to compile and execute a WebAssembly module and its functions. We use [`WasmEdge`](https://github.com/WasmEdge/WasmEdge) as the default executor. By enabling the feature `wasmtime_executor`, we can use [`wasmtime`](https://github.com/bytecodealliance/wasmtime) as the executor.
 - **`essa-function-scheduler`**: Schedules function execution requests to function executors.
 - **`essa-test-function`:** A WebAssembly module that can be run in `essa`. It shows how to perform function calls across nodes and how to share state between them.
 - **`run-function`**: Helper executable to start a given WebAssembly module by passing it to a function scheduler.
@@ -42,7 +42,7 @@ To run the **test suite**, execute `cargo test`. The **API documentation** can b
 
 In order to run `essa-rs`, you need to first initialize the [`anna-rs`](https://github.com/essa-project/anna-rs) submodule through `git submodule update --init`.
 
-For a **quick demo**, run `cargo run -p essa-test-function --example local`. This command will compile and start all necessary runtime nodes, compile the `essa-test-function` to WASM, and then run the compiled WASM module on the started essa-rs nodes.
+For a **quick demo**, run `cargo run -p essa-test-function --example local`. This command will compile and start all necessary runtime nodes, compile the `essa-test-function` to WASM, and then run the compiled WASM module on the started essa-rs nodes. It is worth noting that in this demo, [`WasmEdge`](https://github.com/WasmEdge/WasmEdge) will be used as the default executor.
 
 For a **manual run**, execute the following commands in different terminal windows:
 
@@ -63,8 +63,15 @@ For a **manual run**, execute the following commands in different terminal windo
   ```
 - Start an `essa-rs` function executor node with ID `0`:
 
+  - Use [`WasmEdge`](https://github.com/WasmEdge/WasmEdge) as the executor:
+
   ```
   cargo run --release -p essa-function-executor -- 0
+  ```
+  - Use [`wasmtime`](https://github.com/bytecodealliance/wasmtime) as the executor:
+
+  ```
+  cargo run --no-default-features --features wasmtime_executor --release -p essa-function-executor -- 0
   ```
 - Compile the `essa-test-function` to WASM and start it through the `run-function` executable:
 
