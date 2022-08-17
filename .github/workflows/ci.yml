@@ -14,6 +14,10 @@ jobs:
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
+
+      - name: "Build WasmEdge"
+        run: curl -sSf https://raw.githubusercontent.com/WasmEdge/WasmEdge/master/utils/install.sh | bash
+
       - uses: actions/checkout@v3
         with:
           submodules: true
@@ -31,7 +35,7 @@ jobs:
         run: cargo build --release -p essa-test-function --target wasm32-wasi
 
       - name: "Test Rust code"
-        run: cargo test --workspace --exclude essa-test-function
+        run: source $HOME/.wasmedge/env && cargo test --workspace --exclude essa-test-function
         timeout-minutes: 10
 
   test_wasmtime:
