@@ -4,11 +4,11 @@
 
 use crate::{get_args, get_module, kvs_get, kvs_put, EssaResult, FunctionExecutor};
 use anna::{lattice::LastWriterWinsLattice, nodes::ClientNode, ClientKey};
-use anyhow::Context;
+use anyhow::{bail, Context};
 use essa_common::scheduler_function_call_topic;
 use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
-use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, Trap, ValType};
+use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, ValType};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 use zenoh::{
     prelude::{Receiver, Sample, SplitBuffer, ZFuture},
@@ -173,7 +173,7 @@ fn set_up_module(
                 // write `args` to the given memory region in the sandbox
                 let mem = match caller.get_export("memory") {
                     Some(Extern::Memory(mem)) => mem,
-                    _ => return Err(Trap::new("failed to find host memory")),
+                    _ => bail!("failed to find host memory"),
                 };
                 mem.write(&mut caller, buf_ptr as usize, args.as_slice())
                     .context("val ptr/len out of bounds")?;
@@ -190,7 +190,7 @@ fn set_up_module(
                 // copy the given memory region out of the sandbox
                 let mem = match caller.get_export("memory") {
                     Some(Extern::Memory(mem)) => mem,
-                    _ => return Err(Trap::new("failed to find host memory")),
+                    _ => bail!("failed to find host memory"),
                 };
                 let mut buf = vec![0; buf_len as usize];
                 mem.read(&mut caller, buf_ptr as usize, &mut buf)
@@ -315,12 +315,12 @@ fn essa_call_wrapper(
     serialized_args_ptr: u32,
     serialized_args_len: u32,
     result_handle_ptr: u32,
-) -> Result<EssaResult, Trap> {
+) -> anyhow::Result<EssaResult> {
     // Use our `caller` context to get the memory export of the
     // module which called this host function.
     let mem = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
+        _ => bail!("failed to find host memory"),
     };
 
     // read the function name from the WASM sandbox
@@ -364,12 +364,12 @@ fn essa_get_result_len_wrapper(
     mut caller: Caller<HostState>,
     handle: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
+) -> anyhow::Result<EssaResult> {
     // Use our `caller` context to learn about the memory export of the
     // module which called this host function.
     let mem = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
+        _ => bail!("failed to find host memory"),
     };
 
     // get the corresponding value from the KVS
@@ -400,12 +400,12 @@ fn essa_get_result_wrapper(
     val_ptr: u32,
     val_capacity: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
+) -> anyhow::Result<EssaResult> {
     // Use our `caller` context to learn about the memory export of the
     // module which called this host function.
     let mem = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
+        _ => bail!("failed to find host memory"),
     };
 
     // get the corresponding value from the KVS
@@ -441,12 +441,12 @@ fn essa_put_lattice_wrapper(
     key_len: u32,
     value_ptr: u32,
     value_len: u32,
-) -> Result<EssaResult, Trap> {
+) -> anyhow::Result<EssaResult> {
     // Use our `caller` context to learn about the memory export of the
     // module which called this host function.
     let mem = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
+        _ => bail!("failed to find host memory"),
     };
     // read out and parse the KVS key
     let key = {
@@ -478,12 +478,12 @@ fn essa_get_lattice_len_wrapper(
     key_ptr: u32,
     key_len: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
+) -> anyhow::Result<EssaResult> {
     // Use our `caller` context to learn about the memory export of the
     // module which called this host function.
     let mem = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
+        _ => bail!("failed to find host memory"),
     };
     // read out and parse the KVS key
     let key = {
@@ -523,12 +523,12 @@ fn essa_get_lattice_data_wrapper(
     val_ptr: u32,
     val_capacity: u32,
     val_len_ptr: u32,
-) -> Result<EssaResult, Trap> {
+) -> anyhow::Result<EssaResult> {
     // Use our `caller` context to learn about the memory export of the
     // module which called this host function.
     let mem = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        _ => return Err(Trap::new("failed to find host memory")),
+        _ => bail!("failed to find host memory"),
     };
     // read out and parse the KVS key
     let key = {
