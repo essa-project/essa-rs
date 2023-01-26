@@ -52,7 +52,7 @@ checksum = "ec8ad6edb4840b78c5c3d88de606b22252d552b55f3a4699fbb10fc070ec3049"
 [[package]]
 name = "anna"
 version = "0.1.0"
-source = "git+https://github.com/essa-project/anna-rs.git#a49ded9386ababf236c757c908406cd5578d14c4"
+source = "git+https://github.com/essa-project/anna-rs.git#621e431c9d3d72946757b4f7d634aabcfff8b340"
 dependencies = [
  "anna-api",
  "argh",
@@ -77,7 +77,7 @@ dependencies = [
 [[package]]
 name = "anna-api"
 version = "0.1.0"
-source = "git+https://github.com/essa-project/anna-rs.git#a49ded9386ababf236c757c908406cd5578d14c4"
+source = "git+https://github.com/essa-project/anna-rs.git#621e431c9d3d72946757b4f7d634aabcfff8b340"
 dependencies = [
  "chrono",
  "eyre",
@@ -587,7 +587,6 @@ dependencies = [
  "num-integer",
  "num-traits",
  "serde",
- "time",
  "winapi",
 ]
 
@@ -2911,17 +2910,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "time"
-version = "0.1.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6db9e6914ab8b1ae1c260a4ae7a49b6c5611b40328a735b21862567685e73255"
-dependencies = [
- "libc",
- "wasi 0.10.0+wasi-snapshot-preview1",
- "winapi",
 ]
 
 [[package]]
