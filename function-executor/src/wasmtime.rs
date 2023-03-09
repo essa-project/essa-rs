@@ -50,7 +50,7 @@ impl FunctionExecutor {
         let default_func = linker
             .get_default(&mut store, "")
             .context("module has no default function")?
-            .typed::<(), (), _>(&store)
+            .typed::<(), ()>(&store)
             .context("default function has invalid type")?;
 
         log::info!("Starting default function of wasm module");
@@ -102,7 +102,7 @@ impl FunctionExecutor {
             .get(&mut store, "", function_name)
             .and_then(|e| e.into_func())
             .with_context(|| format!("module has no function `{}`", function_name))?
-            .typed::<(i32,), (), _>(&store)
+            .typed::<(i32,), ()>(&store)
             .context("default function has invalid type")?;
 
         func.call(&mut store, (args_len as i32,))
