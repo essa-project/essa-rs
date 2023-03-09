@@ -9,7 +9,7 @@ license = "Apache-2.0"
 [dependencies]
 anyhow = "1.0.45"
 wasmtime = "4.0.1"
-wasmtime-wasi = "3.0.1"
+wasmtime-wasi = "4.0.0"
 argh = "0.1.6"
 # keep in sync with anna-rs
 zenoh = { git = "https://github.com/eclipse-zenoh/zenoh.git", rev = "d4b00540cd0faa6ce585e11862cf9740ca226489" }
