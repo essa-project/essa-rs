@@ -377,23 +377,14 @@ impl InstanceWrapper {
 
         // Register import module.
         let import = ImportObjectBuilder::new()
-            .with_func_single_thread::<(i32, i32), i32>("essa_get_args", essa_get_args)?
-            .with_func_single_thread::<(i32, i32), i32>("essa_set_result", essa_set_result)?
-            .with_func_single_thread::<(i32, i32, i32, i32, i32), i32>("essa_call", essa_call)?
-            .with_func_single_thread::<(i32, i32), i32>("essa_get_result_len", essa_get_result_len)?
-            .with_func_single_thread::<(i32, i32, i32, i32), i32>(
-                "essa_get_result",
-                essa_get_result,
-            )?
-            .with_func_single_thread::<(i32, i32, i32, i32), i32>(
-                "essa_put_lattice",
-                essa_put_lattice,
-            )?
-            .with_func_single_thread::<(i32, i32, i32), i32>(
-                "essa_get_lattice_len",
-                essa_get_lattice_len,
-            )?
-            .with_func_single_thread::<(i32, i32, i32, i32, i32), i32>(
+            .with_func::<(i32, i32), i32>("essa_get_args", essa_get_args)?
+            .with_func::<(i32, i32), i32>("essa_set_result", essa_set_result)?
+            .with_func::<(i32, i32, i32, i32, i32), i32>("essa_call", essa_call)?
+            .with_func::<(i32, i32), i32>("essa_get_result_len", essa_get_result_len)?
+            .with_func::<(i32, i32, i32, i32), i32>("essa_get_result", essa_get_result)?
+            .with_func::<(i32, i32, i32, i32), i32>("essa_put_lattice", essa_put_lattice)?
+            .with_func::<(i32, i32, i32), i32>("essa_get_lattice_len", essa_get_lattice_len)?
+            .with_func::<(i32, i32, i32, i32, i32), i32>(
                 "essa_get_lattice_data",
                 essa_get_lattice_data,
             )?
