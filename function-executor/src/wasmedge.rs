@@ -395,14 +395,14 @@ impl InstanceWrapper {
             .register_import_module(&mut self.executor, self.import.as_ref().unwrap())
             .context("failed to register and instantiate a wasmedge import object into a store")?;
 
-        // Register wasi module.
-        let wasi = ImportObjectBuilder::new()
-            .build_as_wasi(None, None, None)
-            .context("failed to create a ImportObject")?;
-        self.wasi = Some(wasi);
-        self.store
-            .register_import_module(&mut self.executor, self.wasi.as_ref().unwrap())
-            .context("failed to register and instantiate a wasmedge import object into a store")?;
+        // todo: Register wasi module.
+        // let wasi = ImportObjectBuilder::new()
+        //     .build_as_wasi(None, None, None)
+        //     .context("failed to create a ImportObject")?;
+        // self.wasi = Some(wasi);
+        // self.store
+        //     .register_import_module(&mut self.executor, self.wasi.as_ref().unwrap())
+        //     .context("failed to register and instantiate a wasmedge import object into a store")?;
 
         // Register active module and get the instance.
         self.instance = Some(
@@ -424,7 +424,7 @@ impl InstanceWrapper {
     fn call_default(&mut self) -> Result<(), anyhow::Error> {
         let func = get_default(self.get_instance()?).context("module has no default function")?;
 
-        let func_ty = func.ty().context("failed to get the function type")?;
+        let func_ty = func.ty(); //.context("failed to get the function type")?;
 
         // Check the signature of the default function.
         if func_ty.args_len() != 0 || func_ty.returns_len() != 0 {
@@ -433,7 +433,7 @@ impl InstanceWrapper {
 
         log::info!("Starting default function of wasm module");
 
-        func.call(&mut self.executor, [])
+        func.run(&mut self.executor, [])
             .context("default function failed")?;
 
         Ok(())
@@ -447,7 +447,7 @@ impl InstanceWrapper {
             .func(name)
             .with_context(|| format!("module has no function `{}`", name))?;
 
-        let func_ty = func.ty().context("failed to get the function type")?;
+        let func_ty = func.ty();
 
         // Check the signature of the function
         if func_ty
@@ -462,7 +462,7 @@ impl InstanceWrapper {
             )));
         }
 
-        func.call(&mut self.executor, vec![WasmValue::from_i32(args)])
+        func.run(&mut self.executor, vec![WasmValue::from_i32(args)])
             .context("function trapped")?;
 
         Ok(())
@@ -477,12 +477,12 @@ impl InstanceWrapper {
 
 /// Returns the "default export" of a WASM instance.
 fn get_default(instance: &Instance) -> Result<Func, anyhow::Error> {
-    if let Some(func) = instance.func("") {
+    if let Ok(func) = instance.func("") {
         return Ok(func);
     }
 
     // For compatibility, also recognize "_start".
-    if let Some(func) = instance.func("_start") {
+    if let Ok(func) = instance.func("_start") {
         return Ok(func);
     }
 
@@ -490,7 +490,7 @@ fn get_default(instance: &Instance) -> Result<Func, anyhow::Error> {
     let func = |_: CallingFrame, _: Vec<WasmValue>| -> Result<Vec<WasmValue>, HostFuncError> {
         Ok(vec![])
     };
-    Func::wrap_single_thread::<(), ()>(func).context("failed to create wasmedge function")
+    Func::wrap::<(), ()>(func).context("failed to create wasmedge function")
 }
 
 /// Host function for calling the specified function on a remote node.
