@@ -12,11 +12,11 @@ use std::{
 };
 use uuid::Uuid;
 use wasmedge_sdk::{
-    error::HostFuncError, CallingFrame, Executor, Func, ImportObject, ImportObjectBuilder,
-    Instance, Memory, Module, Store,
+    error::HostFuncError, CallingFrame, Executor, ExternalInstanceType, Func, ImportObject,
+    ImportObjectBuilder, Instance, Memory, Module, Store, ValType, WasmValue,
 };
-use wasmedge_sys::types::WasmValue;
-use wasmedge_types::{ExternalInstanceType, ValType};
+// use wasmedge_sys::types::WasmValue;
+// use wasmedge_types::{ExternalInstanceType, ValType};
 use zenoh::{
     prelude::{Receiver, Sample, SplitBuffer, ZFuture},
     query::ReplyReceiver,
@@ -163,7 +163,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_args = move |_: &CallingFrame,
+        let essa_get_args = move |_: CallingFrame,
                                   inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let buf_ptr = inputs[0].to_i32() as u32;
@@ -188,7 +188,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_set_result = move |_: &CallingFrame,
+        let essa_set_result = move |_: CallingFrame,
                                     inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let buf_ptr = inputs[0].to_i32() as u32;
@@ -211,7 +211,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_call = move |_: &CallingFrame,
+        let essa_call = move |_: CallingFrame,
                               inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let function_name_ptr = inputs[0].to_i32() as u32;
@@ -244,7 +244,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_result_len = move |_: &CallingFrame,
+        let essa_get_result_len = move |_: CallingFrame,
                                         inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let handle = inputs[0].to_i32() as u32;
@@ -266,7 +266,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_result = move |_: &CallingFrame,
+        let essa_get_result = move |_: CallingFrame,
                                     inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let handle = inputs[0].to_i32() as u32;
@@ -297,7 +297,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_put_lattice = move |_: &CallingFrame,
+        let essa_put_lattice = move |_: CallingFrame,
                                      inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let key_ptr = inputs[0].to_i32() as u32;
@@ -323,7 +323,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_lattice_len = move |_: &CallingFrame,
+        let essa_get_lattice_len = move |_: CallingFrame,
                                          inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let key_ptr = inputs[0].to_i32() as u32;
@@ -347,7 +347,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_lattice_data = move |_: &CallingFrame,
+        let essa_get_lattice_data = move |_: CallingFrame,
                                           inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let key_ptr = inputs[0].to_i32() as u32;
@@ -487,7 +487,7 @@ fn get_default(instance: &Instance) -> Result<Func, anyhow::Error> {
     }
 
     // Otherwise return a no-op function.
-    let func = |_: &CallingFrame, _: Vec<WasmValue>| -> Result<Vec<WasmValue>, HostFuncError> {
+    let func = |_: CallingFrame, _: Vec<WasmValue>| -> Result<Vec<WasmValue>, HostFuncError> {
         Ok(vec![])
     };
     Func::wrap_single_thread::<(), ()>(func).context("failed to create wasmedge function")
