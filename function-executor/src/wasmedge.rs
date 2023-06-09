@@ -14,8 +14,8 @@ use uuid::Uuid;
 use wasmedge_sdk::{
     config::{CommonConfigOptions, ConfigBuilder, HostRegistrationConfigOptions},
     error::HostFuncError,
-    CallingFrame, Executor, ExternalInstanceType, Func, ImportObject, ImportObjectBuilder,
-    Instance, Memory, Module, Store, ValType, Vm, VmBuilder, WasmValue,
+    CallingFrame, ExternalInstanceType, Func, ImportObjectBuilder, Instance, Memory, Module,
+    ValType, Vm, VmBuilder, WasmValue,
 };
 use zenoh::{
     prelude::{Receiver, Sample, SplitBuffer, ZFuture},
@@ -126,20 +126,12 @@ unsafe impl Send for HostContext {}
 
 /// A wrapper that stores some important data structures of WasmEdge runtime.
 struct InstanceWrapper {
-    // executor: Executor,
-    // store: Store,
-    // instance: Option<Instance>,
-    memory: Option<Memory>,
-    // import: Option<ImportObject>,
-    // wasi: Option<ImportObject>,
     vm: Vm,
+    memory: Option<Memory>,
 }
 
 impl InstanceWrapper {
     fn new() -> Result<Self, anyhow::Error> {
-        // let executor = Executor::new(None, None).context("failed to create wasmedge executor")?;
-        // let store = Store::new().context("failed to create wasmedge store")?;
-
         // create a config
         let config = ConfigBuilder::new(CommonConfigOptions::default())
             .with_host_registration_config(HostRegistrationConfigOptions::default().wasi(true))
@@ -151,15 +143,7 @@ impl InstanceWrapper {
             .build()
             .context("failed to create a wasmedge vm")?;
 
-        Ok(InstanceWrapper {
-            // executor,
-            // store,
-            // instance: None,
-            memory: None,
-            // import: None,
-            // wasi: None,
-            vm,
-        })
+        Ok(InstanceWrapper { vm, memory: None })
     }
 
     /// Register the import module, wasi module, active module to the WasmEdge Store.
@@ -405,15 +389,6 @@ impl InstanceWrapper {
             .vm
             .register_import_module(import)
             .context("failed to register an import object into vm")?;
-
-        // todo: Register wasi module.
-        // let wasi = ImportObjectBuilder::new()
-        //     .build_as_wasi(None, None, None)
-        //     .context("failed to create a ImportObject")?;
-        // self.wasi = Some(wasi);
-        // self.store
-        //     .register_import_module(&mut self.executor, self.wasi.as_ref().unwrap())
-        //     .context("failed to register and instantiate a wasmedge import object into a store")?;
 
         // Register active module and get the instance.
         self.vm = self
