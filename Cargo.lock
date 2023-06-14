@@ -1053,8 +1053,6 @@ dependencies = [
  "smol",
  "uuid 0.8.2",
  "wasmedge-sdk",
- "wasmedge-sys",
- "wasmedge-types",
  "wasmtime",
  "wasmtime-wasi",
  "zenoh",

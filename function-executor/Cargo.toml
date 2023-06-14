@@ -1,33 +1,31 @@
 [package]
-name = "essa-function-executor"
-version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+name = "essa-function-executor"
+version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.45"
-eyre = "0.6.5"
-wasmtime = { version = "9.0.3", optional = true }
-wasmtime-wasi = { version = "9.0.3", optional = true }
-wasmedge-sdk = { version = "0.8.1", optional = true }
-wasmedge-sys = { version = "0.13.1", optional = true }
-wasmedge-types = { version = "0.4.1", optional = true }
 argh = "0.1.6"
+eyre = "0.6.5"
+wasmedge-sdk = {version = "0.8.1", optional = true}
+wasmtime = {version = "9.0.3", optional = true}
+wasmtime-wasi = {version = "9.0.3", optional = true}
 # keep in sync with anna-rs
-zenoh = { git = "https://github.com/eclipse-zenoh/zenoh.git", rev = "d4b00540cd0faa6ce585e11862cf9740ca226489" }
-essa-common = { path = "../common" }
-uuid = { version = "0.8.2", features = ["v4"] }
-smol = "1.2.5"
-log = "0.4.14"
-fern = "0.6.0"
-chrono = { version = "0.4.19", default-features = false }
-serde = { version = "1.0.130", features = ["derive"] }
+anna = {git = "https://github.com/essa-project/anna-rs.git"}
 bincode = "1.3.3"
-anna = { git = "https://github.com/essa-project/anna-rs.git" }
+chrono = {version = "0.4.19", default-features = false}
+essa-common = {path = "../common"}
+fern = "0.6.0"
+log = "0.4.14"
+serde = {version = "1.0.130", features = ["derive"]}
+smol = "1.2.5"
+uuid = {version = "0.8.2", features = ["v4"]}
+zenoh = {git = "https://github.com/eclipse-zenoh/zenoh.git", rev = "d4b00540cd0faa6ce585e11862cf9740ca226489"}
 
 [features]
 default = ["wasmedge_executor"]
+wasmedge_executor = ["wasmedge-sdk"]
 wasmtime_executor = ["wasmtime", "wasmtime-wasi"]
-wasmedge_executor = ["wasmedge-sdk", "wasmedge-sys", "wasmedge-types"]

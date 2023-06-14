@@ -12,11 +12,11 @@ use std::{
 };
 use uuid::Uuid;
 use wasmedge_sdk::{
-    error::HostFuncError, CallingFrame, Executor, Func, ImportObject, ImportObjectBuilder,
-    Instance, Memory, Module, Store,
+    config::{CommonConfigOptions, ConfigBuilder, HostRegistrationConfigOptions},
+    error::HostFuncError,
+    CallingFrame, ExternalInstanceType, Func, ImportObjectBuilder, Instance, Memory, Module,
+    ValType, Vm, VmBuilder, WasmValue,
 };
-use wasmedge_sys::types::WasmValue;
-use wasmedge_types::{ExternalInstanceType, ValType};
 use zenoh::{
     prelude::{Receiver, Sample, SplitBuffer, ZFuture},
     query::ReplyReceiver,
@@ -29,8 +29,7 @@ impl FunctionExecutor {
         log::info!("Start running WASM module");
 
         // compile the WASM module
-        let module =
-            Arc::new(Module::from_bytes(None, &wasm_bytes).context("failed to load wasm module")?);
+        let module = Module::from_bytes(None, &wasm_bytes).context("failed to load wasm module")?;
 
         // store the compiled module in the key-value store under an
         // unique key (to avoid recompiling the module on future function
@@ -56,8 +55,8 @@ impl FunctionExecutor {
             anna: self.anna,
         };
 
-        let mut instance_wrapper = InstanceWrapper::new()?;
-        instance_wrapper.register(&module, &mut host_state, vec![])?;
+        let mut instance_wrapper =
+            InstanceWrapper::new()?.register(module, &mut host_state, vec![])?;
 
         instance_wrapper.call_default()?;
         Ok(())
@@ -80,8 +79,7 @@ impl FunctionExecutor {
 
         // deserialize and set up WASM module
         // TODO: deserialize the bytes into WasmEdge module, require WasmEdge core support.
-        let module =
-            Arc::new(Module::from_bytes(None, &module).context("failed to load wasm module")?);
+        let module = Module::from_bytes(None, &module).context("failed to load wasm module")?;
 
         let mut host_state = HostState {
             module: module.clone(),
@@ -95,8 +93,8 @@ impl FunctionExecutor {
             anna: self.anna,
         };
 
-        let mut instance_wrapper = InstanceWrapper::new()?;
-        instance_wrapper.register(&module, &mut host_state, args)?;
+        let mut instance_wrapper =
+            InstanceWrapper::new()?.register(module, &mut host_state, args)?;
 
         instance_wrapper.call(function_name, args_len as i32)?;
 
@@ -128,42 +126,39 @@ unsafe impl Send for HostContext {}
 
 /// A wrapper that stores some important data structures of WasmEdge runtime.
 struct InstanceWrapper {
-    executor: Executor,
-    store: Store,
-    instance: Option<Instance>,
+    vm: Vm,
     memory: Option<Memory>,
-    import: Option<ImportObject>,
-    wasi: Option<ImportObject>,
 }
 
 impl InstanceWrapper {
     fn new() -> Result<Self, anyhow::Error> {
-        let executor = Executor::new(None, None).context("failed to create wasmedge executor")?;
-        let store = Store::new().context("failed to create wasmedge store")?;
+        // create a config
+        let config = ConfigBuilder::new(CommonConfigOptions::default())
+            .with_host_registration_config(HostRegistrationConfigOptions::default().wasi(true))
+            .build()
+            .context("failed to create a wasmedge config")?;
+        // create a vm
+        let vm = VmBuilder::default()
+            .with_config(config)
+            .build()
+            .context("failed to create a wasmedge vm")?;
 
-        Ok(InstanceWrapper {
-            executor,
-            store,
-            instance: None,
-            memory: None,
-            import: None,
-            wasi: None,
-        })
+        Ok(InstanceWrapper { vm, memory: None })
     }
 
     /// Register the import module, wasi module, active module to the WasmEdge Store.
     fn register(
-        &mut self,
-        module: &Module,
+        mut self,
+        module: Module,
         host_state: &mut HostState,
         args: Vec<u8>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<Self, anyhow::Error> {
         // essa_get_args
         let host_context = Arc::new(Mutex::new(HostContext {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_args = move |_: &CallingFrame,
+        let essa_get_args = move |_: CallingFrame,
                                   inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let buf_ptr = inputs[0].to_i32() as u32;
@@ -188,7 +183,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_set_result = move |_: &CallingFrame,
+        let essa_set_result = move |_: CallingFrame,
                                     inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let buf_ptr = inputs[0].to_i32() as u32;
@@ -211,7 +206,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_call = move |_: &CallingFrame,
+        let essa_call = move |_: CallingFrame,
                               inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let function_name_ptr = inputs[0].to_i32() as u32;
@@ -244,7 +239,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_result_len = move |_: &CallingFrame,
+        let essa_get_result_len = move |_: CallingFrame,
                                         inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let handle = inputs[0].to_i32() as u32;
@@ -266,7 +261,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_result = move |_: &CallingFrame,
+        let essa_get_result = move |_: CallingFrame,
                                     inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let handle = inputs[0].to_i32() as u32;
@@ -297,7 +292,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_put_lattice = move |_: &CallingFrame,
+        let essa_put_lattice = move |_: CallingFrame,
                                      inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let key_ptr = inputs[0].to_i32() as u32;
@@ -323,7 +318,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_lattice_len = move |_: &CallingFrame,
+        let essa_get_lattice_len = move |_: CallingFrame,
                                          inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let key_ptr = inputs[0].to_i32() as u32;
@@ -347,7 +342,7 @@ impl InstanceWrapper {
             memory: &mut self.memory as *mut Option<Memory>,
             host_state: host_state as *mut HostState,
         }));
-        let essa_get_lattice_data = move |_: &CallingFrame,
+        let essa_get_lattice_data = move |_: CallingFrame,
                                           inputs: Vec<WasmValue>|
               -> Result<Vec<WasmValue>, HostFuncError> {
             let key_ptr = inputs[0].to_i32() as u32;
@@ -390,26 +385,16 @@ impl InstanceWrapper {
             )?
             .build("host")
             .context("failed to create a ImportObject")?;
-        self.import = Some(import);
-        self.store
-            .register_import_module(&mut self.executor, self.import.as_ref().unwrap())
-            .context("failed to register and instantiate a wasmedge import object into a store")?;
-
-        // Register wasi module.
-        let wasi = ImportObjectBuilder::new()
-            .build_as_wasi(None, None, None)
-            .context("failed to create a ImportObject")?;
-        self.wasi = Some(wasi);
-        self.store
-            .register_import_module(&mut self.executor, self.wasi.as_ref().unwrap())
-            .context("failed to register and instantiate a wasmedge import object into a store")?;
+        self.vm = self
+            .vm
+            .register_import_module(import)
+            .context("failed to register an import object into vm")?;
 
         // Register active module and get the instance.
-        self.instance = Some(
-            self.store
-                .register_active_module(&mut self.executor, module)
-                .context("failed to register and instantiate a wasmedge module into a store as an anonymous module")?
-        );
+        self.vm = self
+            .vm
+            .register_module(None, module)
+            .context("failed to register an active module into vm")?;
 
         self.memory = Some(
             self.get_instance()?
@@ -417,14 +402,14 @@ impl InstanceWrapper {
                 .context("failed to find host memory")?,
         );
 
-        Ok(())
+        Ok(self)
     }
 
     // Call the “default function” of a module.
     fn call_default(&mut self) -> Result<(), anyhow::Error> {
         let func = get_default(self.get_instance()?).context("module has no default function")?;
 
-        let func_ty = func.ty().context("failed to get the function type")?;
+        let func_ty = func.ty(); //.context("failed to get the function type")?;
 
         // Check the signature of the default function.
         if func_ty.args_len() != 0 || func_ty.returns_len() != 0 {
@@ -433,7 +418,7 @@ impl InstanceWrapper {
 
         log::info!("Starting default function of wasm module");
 
-        func.call(&mut self.executor, [])
+        func.run(&mut self.vm.executor_mut(), [])
             .context("default function failed")?;
 
         Ok(())
@@ -447,7 +432,7 @@ impl InstanceWrapper {
             .func(name)
             .with_context(|| format!("module has no function `{}`", name))?;
 
-        let func_ty = func.ty().context("failed to get the function type")?;
+        let func_ty = func.ty();
 
         // Check the signature of the function
         if func_ty
@@ -462,35 +447,35 @@ impl InstanceWrapper {
             )));
         }
 
-        func.call(&mut self.executor, vec![WasmValue::from_i32(args)])
+        func.run(&mut self.vm.executor_mut(), vec![WasmValue::from_i32(args)])
             .context("function trapped")?;
 
         Ok(())
     }
 
     fn get_instance(&self) -> Result<&Instance, anyhow::Error> {
-        self.instance
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("module has not been instantiated"))
+        self.vm
+            .active_module()
+            .context("failed to get the active module")
     }
 }
 
 /// Returns the "default export" of a WASM instance.
 fn get_default(instance: &Instance) -> Result<Func, anyhow::Error> {
-    if let Some(func) = instance.func("") {
+    if let Ok(func) = instance.func("") {
         return Ok(func);
     }
 
     // For compatibility, also recognize "_start".
-    if let Some(func) = instance.func("_start") {
+    if let Ok(func) = instance.func("_start") {
         return Ok(func);
     }
 
     // Otherwise return a no-op function.
-    let func = |_: &CallingFrame, _: Vec<WasmValue>| -> Result<Vec<WasmValue>, HostFuncError> {
+    let func = |_: CallingFrame, _: Vec<WasmValue>| -> Result<Vec<WasmValue>, HostFuncError> {
         Ok(vec![])
     };
-    Func::wrap_single_thread::<(), ()>(func).context("failed to create wasmedge function")
+    Func::wrap::<(), ()>(func).context("failed to create wasmedge function")
 }
 
 /// Host function for calling the specified function on a remote node.
@@ -708,7 +693,7 @@ fn essa_get_lattice_data_wrapper(
 /// Stores all the information needed during execution.
 struct HostState {
     /// The compiled WASM module.
-    module: Arc<Module>,
+    module: Module,
     /// The KVS key under which a serialized version of the compiled WASM
     /// module is stored.
     module_key: ClientKey,
