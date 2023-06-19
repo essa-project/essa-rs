@@ -1,3 +1,5 @@
+// TODO:
+
 //! Use wasmtime as executor's runtime.
 
 #![warn(missing_docs)]
@@ -11,9 +13,9 @@ use uuid::Uuid;
 use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, ValType};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 use zenoh::{
-    prelude::{Receiver, Sample, SplitBuffer, ZFuture},
-    query::ReplyReceiver,
+    prelude::r#async::*,
     queryable::Query,
+    query::Reply,
 };
 
 impl FunctionExecutor {
@@ -69,8 +71,8 @@ impl FunctionExecutor {
     }
 
     /// Runs the given function of a already compiled WASM module.
-    pub fn handle_function_call(mut self, query: Query) -> anyhow::Result<()> {
-        let mut topic_split = query.key_selector().as_str().split('/');
+    pub async fn handle_function_call(mut self, query: Query) -> anyhow::Result<()> {
+        let mut topic_split = query.key_expr().as_str().split('/');
         let args_key = ClientKey::from(topic_split.next_back().context("no args key in topic")?);
         let function_name = topic_split
             .next_back()
@@ -117,8 +119,11 @@ impl FunctionExecutor {
         // busy-wait on the result key in the KVS anymore.
         let mut host_state = store.into_data();
         if let Some(result_value) = host_state.function_result.take() {
-            let selector = query.key_selector().to_string();
-            query.reply(Sample::new(selector, result_value));
+            let selector = query.key_expr().clone();
+            query.reply(Ok(Sample::new(selector, result_value))).res().await.map_err(|e| {
+                let err = Box::<dyn std::error::Error + 'static + Send + Sync>::from(e);
+                anyhow::anyhow!(err)
+            })?;
 
             Ok(())
         } else {
@@ -126,6 +131,7 @@ impl FunctionExecutor {
         }
     }
 }
+
 
 /// Link the host functions and WASI abstractions into the WASM module.
 fn set_up_module(
@@ -371,9 +377,10 @@ fn essa_get_result_len_wrapper(
         Some(Extern::Memory(mem)) => mem,
         _ => bail!("failed to find host memory"),
     };
+    let a = smol::block_on(caller.data_mut().get_result(handle));
 
     // get the corresponding value from the KVS
-    match caller.data_mut().get_result(handle) {
+    match a {
         Ok(value) => {
             let len = value.len();
             // write the length of the value into the sandbox
@@ -409,7 +416,7 @@ fn essa_get_result_wrapper(
     };
 
     // get the corresponding value from the KVS
-    match caller.data_mut().get_result(handle) {
+    match smol::block_on(caller.data_mut().get_result(handle)) {
         Ok(value) => {
             if value.len() > val_capacity as usize {
                 Ok(EssaResult::BufferTooSmall)
@@ -580,7 +587,7 @@ struct HostState {
     function_result: Option<Vec<u8>>,
 
     next_result_handle: u32,
-    result_receivers: HashMap<u32, ReplyReceiver>,
+    result_receivers: HashMap<u32, flume::Receiver<Reply>>,
     results: HashMap<u32, Arc<Vec<u8>>>,
 
     zenoh: Arc<zenoh::Session>,
@@ -595,7 +602,7 @@ impl HostState {
         &mut self,
         function_name: String,
         args: Vec<u8>,
-    ) -> Result<ReplyReceiver, EssaResult> {
+    ) -> Result<flume::Receiver<Reply>, EssaResult> {
         // get the requested function and check its signature
         let func = self
             .module
@@ -618,13 +625,13 @@ impl HostState {
         .map_err(|_| EssaResult::UnknownError)?;
 
         // trigger the function call on a remote node
-        let reply = call_function_extern(
+        let reply = smol::block_on(call_function_extern(
             self.module_key.clone(),
             function_name,
             args_key,
             self.zenoh.clone(),
             &self.zenoh_prefix,
-        )
+        ))
         .unwrap();
 
         Ok(reply)
@@ -647,13 +654,22 @@ impl HostState {
         format!("{}/data/{}", self.module_key, key).into()
     }
 
-    fn get_result(&mut self, handle: u32) -> Result<Arc<Vec<u8>>, EssaResult> {
+    async fn get_result(&mut self, handle: u32) -> Result<Arc<Vec<u8>>, EssaResult> {
         match self.results.entry(handle) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.get().clone()),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 if let Some(result) = self.result_receivers.remove(&handle) {
-                    let reply = result.recv().map_err(|_| EssaResult::UnknownError)?;
-                    let value = reply.sample.value.payload.contiguous().into_owned();
+                    let reply = result.recv_async().await.map_err(|e| {
+                        println!("erro do recv_async: {e:?}");
+                        EssaResult::UnknownError
+                    } )?;
+                    let value = reply
+                        .sample
+                        .map_err(|_e| EssaResult::UnknownError)?
+                        .value
+                        .payload
+                        .contiguous()
+                        .into_owned();
                     let value = entry.insert(Arc::new(value));
                     Ok(value.clone())
                 } else {
@@ -669,19 +685,20 @@ impl HostState {
 }
 
 /// Call the specfied function on a remote node.
-fn call_function_extern(
+async fn call_function_extern(
     module_key: ClientKey,
     function_name: String,
     args_key: ClientKey,
     zenoh: Arc<zenoh::Session>,
     zenoh_prefix: &str,
-) -> anyhow::Result<ReplyReceiver> {
+) -> anyhow::Result<flume::Receiver<Reply>> {
     let topic = scheduler_function_call_topic(zenoh_prefix, &module_key, &function_name, &args_key);
 
     // send the request to the scheduler node
     let reply = zenoh
         .get(topic)
-        .wait()
+        .res()
+        .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to send function call request to scheduler")?;
 

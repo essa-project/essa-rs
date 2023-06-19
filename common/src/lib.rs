@@ -5,7 +5,7 @@
 
 /// The default topic prefix for zenoh, used by all essa code.
 pub fn essa_default_zenoh_prefix() -> &'static str {
-    "/essa"
+    "essa"
 }
 
 /// The subtopic for instructing the essa function scheduler to start the given

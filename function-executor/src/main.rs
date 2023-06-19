@@ -1,12 +1,3 @@
-//! Essa function execution nodes are responsible for running given WASM
-//! modules/functions.
-//!
-//! In an essa-rs system, there are typically multiple nodes, each running the
-//! essa function executor binary. The essa scheduler dispatches incoming run
-//! requests evenly across the available function executor nodes.
-
-#![warn(missing_docs)]
-
 use anna::{
     anna_default_zenoh_prefix,
     lattice::Lattice,
@@ -21,17 +12,17 @@ use essa_common::{
 };
 use std::{
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
-use zenoh::prelude::{Receiver, SplitBuffer, ZFuture};
+use zenoh::prelude::r#async::*;
 
 #[cfg(all(feature = "wasmedge_executor", feature = "wasmtime_executor"))]
 compile_error!(
     "Both `wasmedge_executor` and `wasmtime_executor` features are enabled, but \
     only one WASM runtime is supported at a time"
 );
+
 #[cfg(all(not(feature = "wasmedge_executor"), not(feature = "wasmtime_executor")))]
 compile_error!("Either the `wasmedge_executor` or the `wasmtime_executor` feature must be enabled");
 #[cfg(feature = "wasmedge_executor")]
@@ -49,11 +40,12 @@ struct Args {
     id: u32,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     if let Err(err) = set_up_logger() {
         eprintln!(
             "ERROR: {:?}",
-            anyhow::anyhow!(err).context("Failed to set up logger")
+            anyhow::anyhow!(err).context("Failed to set up logget")
         );
     }
 
@@ -61,10 +53,12 @@ fn main() -> anyhow::Result<()> {
 
     let zenoh = Arc::new(
         zenoh::open(zenoh::config::Config::default())
-            .wait()
+            .res()
+            .await
             .map_err(|e| anyhow::anyhow!(e))
-            .context("failed to connect to zenoh")?,
+            .context("Failed to connect to zenoh")?,
     );
+
     let zenoh_prefix = essa_default_zenoh_prefix().to_owned();
 
     // listen for function call requests in a separate thread
@@ -73,27 +67,26 @@ fn main() -> anyhow::Result<()> {
         let zenoh_prefix = zenoh_prefix.clone();
         let args = args.clone();
 
-        thread::spawn(move || {
-            if let Err(err) = function_call_receive_loop(args, zenoh, zenoh_prefix) {
+        tokio::spawn(async move {
+            if let Err(err) = function_call_receive_loop(args, zenoh, zenoh_prefix).await {
                 log::error!("{:?}", err)
             }
         });
     }
 
-    // listen for module run requests
-    module_receive_loop(args, zenoh, zenoh_prefix)?;
+    module_receive_loop(args, zenoh, zenoh_prefix).await?;
 
     Ok(())
 }
 
 /// Creates a new client connected to the `anna-rs` key-value store.
-fn new_anna_client(zenoh: Arc<zenoh::Session>) -> Result<ClientNode, anyhow::Error> {
-    let anna_zenoh_prefix = anna_default_zenoh_prefix().to_owned();
+async fn new_anna_client(zenoh: Arc<zenoh::Session>) -> anyhow::Result<ClientNode> {
+    let zenoh_prefix = anna_default_zenoh_prefix().to_owned();
 
-    // request the available routing nodes from an anna seed node
-    let cluster_info = smol::block_on(request_cluster_info(&zenoh, &anna_zenoh_prefix))
+    let cluster_info = request_cluster_info(&zenoh, &zenoh_prefix)
+        .await
         .map_err(|e| anyhow::anyhow!(e))
-        .context("failed to request cluster info from seed node")?;
+        .context("Failed to request cluster info from seed node")?;
 
     let routing_threads: Vec<_> = cluster_info
         .routing_node_ids
@@ -113,30 +106,34 @@ fn new_anna_client(zenoh: Arc<zenoh::Session>) -> Result<ClientNode, anyhow::Err
         routing_threads,
         Duration::from_secs(10),
         zenoh,
-        anna_zenoh_prefix,
+        zenoh_prefix,
     )
     .map_err(eyre_to_anyhow)
     .context("failed to connect to anna")?;
-    smol::block_on(anna.init_tcp_connections())
+
+    anna.init_tcp_connections()
+        .await
         .map_err(eyre_to_anyhow)
-        .context("failed to init TCP connections in anna client")?;
+        .context("Failed to init TCP connections in anna client")?;
+
     Ok(anna)
 }
 
 /// Listens for incoming module run requests from the scheduler.
-fn module_receive_loop(
+async fn module_receive_loop(
     args: Args,
     zenoh: Arc<zenoh::Session>,
     zenoh_prefix: String,
 ) -> anyhow::Result<()> {
-    let mut new_modules = zenoh
-        .subscribe(executor_run_module_topic(args.id, &zenoh_prefix))
-        .wait()
+    let new_modules = zenoh
+        .declare_subscriber(executor_run_module_topic(args.id, &zenoh_prefix))
+        .res()
+        .await
         .map_err(|e| anyhow::anyhow!(e))
-        .context("failed to subscribe to new modules")?;
+        .context("Failed to subscribe to new modules")?;
 
     loop {
-        match new_modules.receiver().recv() {
+        match new_modules.recv_async().await {
             Ok(change) => {
                 let wasm_bytes = change.value.payload.contiguous().into_owned();
 
@@ -145,60 +142,63 @@ fn module_receive_loop(
                 let executor = FunctionExecutor {
                     zenoh: zenoh.clone(),
                     zenoh_prefix: zenoh_prefix.clone(),
-                    anna: new_anna_client(zenoh.clone())?,
+                    anna: new_anna_client(zenoh.clone()).await?,
                 };
-                std::thread::spawn(move || {
+
+                tokio::spawn(async move {
                     let start = Instant::now();
                     if let Err(err) = executor
                         .run_module(wasm_bytes)
-                        .context("failed to run module")
+                        .context("Failed to run module")
                     {
                         log::error!("{:?}", err);
                     }
                     log::info!("Module run finished in {:?}", Instant::now() - start);
                 });
             }
-            Err(zenoh::sync::channel::RecvError::Disconnected) => break,
+            Err(_) => break,
         }
     }
     Ok(())
 }
 
 /// Listens for incoming function run requests.
-fn function_call_receive_loop(
+async fn function_call_receive_loop(
     args: Args,
     zenoh: Arc<zenoh::Session>,
     zenoh_prefix: String,
 ) -> anyhow::Result<()> {
-    let mut function_calls = zenoh
-        .queryable(executor_run_function_subscribe_topic(
+    let function_calls = zenoh
+        .declare_queryable(executor_run_function_subscribe_topic(
             args.id,
             &zenoh_prefix,
         ))
-        .wait()
+        .res()
+        .await
         .map_err(|e| anyhow::anyhow!(e))
-        .context("failed to subscribe to new modules")?;
+        .context("Failed to subscribe to new modules")?;
 
     loop {
-        match function_calls.receiver().recv() {
+        match function_calls.recv_async().await {
             Ok(query) => {
                 // start a new function executor instance to run the requested
                 // function
                 let executor = FunctionExecutor {
                     zenoh: zenoh.clone(),
                     zenoh_prefix: zenoh_prefix.clone(),
-                    anna: new_anna_client(zenoh.clone())?,
+                    anna: new_anna_client(zenoh.clone()).await?,
                 };
-                std::thread::spawn(move || {
+                tokio::spawn(async move {
                     if let Err(err) = executor
                         .handle_function_call(query)
+                        .await
                         .context("failed to run function call")
                     {
                         log::error!("{:?}", err);
                     }
                 });
             }
-            Err(zenoh::sync::channel::RecvError::Disconnected) => break,
+            Err(_) => break,
         }
     }
     Ok(())

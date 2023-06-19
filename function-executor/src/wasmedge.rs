@@ -17,11 +17,10 @@ use wasmedge_sdk::{
     CallingFrame, ExternalInstanceType, Func, ImportObjectBuilder, Instance, Memory, Module,
     ValType, Vm, VmBuilder, WasmValue,
 };
-use zenoh::{
-    prelude::{Receiver, Sample, SplitBuffer, ZFuture},
-    query::ReplyReceiver,
-    queryable::Query,
-};
+
+use zenoh::prelude::r#async::*;
+use zenoh::query::Reply;
+use zenoh::queryable::Query;
 
 impl FunctionExecutor {
     /// Runs the given WASM module.
@@ -63,8 +62,8 @@ impl FunctionExecutor {
     }
 
     /// Runs the given function of a already compiled WASM module.
-    pub fn handle_function_call(mut self, query: Query) -> anyhow::Result<()> {
-        let mut topic_split = query.key_selector().as_str().split('/');
+    pub async fn handle_function_call(mut self, query: Query) -> anyhow::Result<()> {
+        let mut topic_split = query.key_expr().as_str().split('/');
         let args_key = ClientKey::from(topic_split.next_back().context("no args key in topic")?);
         let function_name = topic_split
             .next_back()
@@ -106,8 +105,11 @@ impl FunctionExecutor {
         // also improve performance since the receiver would no longer need to
         // busy-wait on the result key in the KVS anymore.
         if let Some(result_value) = host_state.function_result.take() {
-            let selector = query.key_selector().to_string();
-            query.reply(Sample::new(selector, result_value));
+            let selector = query.key_expr().clone();
+            query.reply(Ok(Sample::new(selector, result_value))).res().await.map_err(|e| {
+                let err = Box::<dyn std::error::Error + 'static + Send + Sync>::from(e);
+                anyhow::anyhow!(err)
+            })?;
 
             Ok(())
         } else {
@@ -220,7 +222,7 @@ impl InstanceWrapper {
                 .unwrap();
             let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
 
-            let res = essa_call_wrapper(
+            let res = smol::block_on(essa_call_wrapper(
                 memory,
                 host_state,
                 function_name_ptr,
@@ -228,7 +230,7 @@ impl InstanceWrapper {
                 serialized_args_ptr,
                 serialized_arg_len,
                 result_handle_ptr,
-            )
+            ))
             .unwrap();
 
             Ok(vec![WasmValue::from_i32(res as i32)])
@@ -305,9 +307,9 @@ impl InstanceWrapper {
                 .unwrap();
             let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
 
-            let res = essa_put_lattice_wrapper(
+            let res = smol::block_on(essa_put_lattice_wrapper(
                 memory, host_state, key_ptr, key_len, value_ptr, value_len,
-            )
+            ))
             .unwrap();
 
             Ok(vec![WasmValue::from_i32(res as i32)])
@@ -330,9 +332,14 @@ impl InstanceWrapper {
                 .unwrap();
             let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
 
-            let res =
-                essa_get_lattice_len_wrapper(memory, host_state, key_ptr, key_len, value_len_ptr)
-                    .unwrap();
+            let res = smol::block_on(essa_get_lattice_len_wrapper(
+                memory,
+                host_state,
+                key_ptr,
+                key_len,
+                value_len_ptr,
+            ))
+            .unwrap();
 
             Ok(vec![WasmValue::from_i32(res as i32)])
         };
@@ -356,7 +363,7 @@ impl InstanceWrapper {
                 .unwrap();
             let host_state = unsafe { &mut *(host_context.lock().unwrap().host_state) };
 
-            let res = essa_get_lattice_data_wrapper(
+            let res = smol::block_on(essa_get_lattice_data_wrapper(
                 memory,
                 host_state,
                 key_ptr,
@@ -364,7 +371,7 @@ impl InstanceWrapper {
                 value_ptr,
                 value_capacity,
                 value_len_ptr,
-            )
+            ))
             .unwrap();
 
             Ok(vec![WasmValue::from_i32(res as i32)])
@@ -479,7 +486,7 @@ fn get_default(instance: &Instance) -> Result<Func, anyhow::Error> {
 }
 
 /// Host function for calling the specified function on a remote node.
-fn essa_call_wrapper(
+async fn essa_call_wrapper(
     memory: &mut Memory,
     host_state: &mut HostState,
     function_name_ptr: u32,
@@ -501,7 +508,7 @@ fn essa_call_wrapper(
         .context("function name ptr/len out of bounds")?;
 
     // trigger the external function call
-    match host_state.essa_call(function_name, args) {
+    match host_state.essa_call(function_name, args).await {
         Ok(reply) => {
             let handle = host_state.next_result_handle;
             host_state.next_result_handle += 1;
@@ -579,7 +586,7 @@ fn essa_get_result_wrapper(
 }
 
 /// Host function for storing a given lattice value into the KVS.
-fn essa_put_lattice_wrapper(
+async fn essa_put_lattice_wrapper(
     memory: &mut Memory,
     host_state: &mut HostState,
     key_ptr: u32,
@@ -601,7 +608,7 @@ fn essa_put_lattice_wrapper(
         .read(value_ptr, value_len)
         .context("value ptr/len out of bounds")?;
 
-    match host_state.put_lattice(&key, &value) {
+    match host_state.put_lattice(&key, &value).await {
         Ok(()) => Ok(EssaResult::Ok),
         Err(other) => Ok(other),
     }
@@ -609,7 +616,7 @@ fn essa_put_lattice_wrapper(
 
 /// Host function for reading the length of value stored under a specific key
 /// in the KVS.
-fn essa_get_lattice_len_wrapper(
+async fn essa_get_lattice_len_wrapper(
     memory: &mut Memory,
     host_state: &mut HostState,
     key_ptr: u32,
@@ -626,7 +633,7 @@ fn essa_get_lattice_len_wrapper(
             .into()
     };
     // get the corresponding value from the KVS
-    match host_state.get_lattice(&key) {
+    match host_state.get_lattice(&key).await {
         Ok(value) => {
             // write the length of the value into the sandbox
             //
@@ -647,7 +654,7 @@ fn essa_get_lattice_len_wrapper(
 }
 
 /// Host function for reading a specific value from the KVS.
-fn essa_get_lattice_data_wrapper(
+async fn essa_get_lattice_data_wrapper(
     memory: &mut Memory,
     host_state: &mut HostState,
     key_ptr: u32,
@@ -666,7 +673,7 @@ fn essa_get_lattice_data_wrapper(
             .into()
     };
     // get the corresponding value from the KVS
-    match host_state.get_lattice(&key) {
+    match host_state.get_lattice(&key).await {
         Ok(value) => {
             if value.len() > val_capacity as usize {
                 Ok(EssaResult::BufferTooSmall)
@@ -702,7 +709,7 @@ struct HostState {
     function_result: Option<Vec<u8>>,
 
     next_result_handle: u32,
-    result_receivers: HashMap<u32, ReplyReceiver>,
+    result_receivers: HashMap<u32, flume::Receiver<Reply>>,
     results: HashMap<u32, Arc<Vec<u8>>>,
 
     zenoh: Arc<zenoh::Session>,
@@ -713,11 +720,11 @@ struct HostState {
 impl HostState {
     /// Calls the given function on a node and returns the reply receiver for
     /// the corresponding result.
-    fn essa_call(
+    async fn essa_call(
         &mut self,
         function_name: String,
         args: Vec<u8>,
-    ) -> Result<ReplyReceiver, EssaResult> {
+    ) -> Result<flume::Receiver<Reply>, EssaResult> {
         // get the requested function and check its signature
         let func = self
             .module
@@ -745,26 +752,26 @@ impl HostState {
         .map_err(|_| EssaResult::UnknownError)?;
 
         // trigger the function call on a remote node
-        let reply = call_function_extern(
+        let reply = smol::block_on(call_function_extern(
             self.module_key.clone(),
             function_name,
             args_key,
             self.zenoh.clone(),
             &self.zenoh_prefix,
-        )
+        ))
         .unwrap();
 
         Ok(reply)
     }
 
     /// Stores the given serialized `LattiveValue` in the KVS.
-    fn put_lattice(&mut self, key: &ClientKey, value: &[u8]) -> Result<(), EssaResult> {
+    async fn put_lattice(&mut self, key: &ClientKey, value: &[u8]) -> Result<(), EssaResult> {
         let value = bincode::deserialize(value).map_err(|_| EssaResult::UnknownError)?;
         kvs_put(self.with_prefix(key), value, &mut self.anna).map_err(|_| EssaResult::UnknownError)
     }
 
     /// Reads the `LattiveValue` at the specified key from the KVS serializes it.
-    fn get_lattice(&mut self, key: &ClientKey) -> Result<Vec<u8>, EssaResult> {
+    async fn get_lattice(&mut self, key: &ClientKey) -> Result<Vec<u8>, EssaResult> {
         kvs_get(self.with_prefix(key), &mut self.anna)
             .map_err(|_| EssaResult::NotFound)
             .and_then(|v| bincode::serialize(&v).map_err(|_| EssaResult::UnknownError))
@@ -780,7 +787,13 @@ impl HostState {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 if let Some(result) = self.result_receivers.remove(&handle) {
                     let reply = result.recv().map_err(|_| EssaResult::UnknownError)?;
-                    let value = reply.sample.value.payload.contiguous().into_owned();
+                    let value = reply
+                        .sample
+                        .map_err(|_e| EssaResult::UnknownError)?
+                        .value
+                        .payload
+                        .contiguous()
+                        .into_owned();
                     let value = entry.insert(Arc::new(value));
                     Ok(value.clone())
                 } else {
@@ -796,19 +809,20 @@ impl HostState {
 }
 
 /// Call the specfied function on a remote node.
-fn call_function_extern(
+async fn call_function_extern(
     module_key: ClientKey,
     function_name: String,
     args_key: ClientKey,
     zenoh: Arc<zenoh::Session>,
     zenoh_prefix: &str,
-) -> anyhow::Result<ReplyReceiver> {
+) -> anyhow::Result<flume::Receiver<Reply>> {
     let topic = scheduler_function_call_topic(zenoh_prefix, &module_key, &function_name, &args_key);
 
     // send the request to the scheduler node
     let reply = zenoh
         .get(topic)
-        .wait()
+        .res()
+        .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to send function call request to scheduler")?;
 

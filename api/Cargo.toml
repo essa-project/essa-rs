@@ -12,4 +12,5 @@ serde = { version = "1.0.130", features = ["derive"] }
 bincode = "1.3.3"
 num_enum = "0.5.4"
 essa-macros = { path = "macros" }
-anna-api = { git = "https://github.com/essa-project/anna-rs.git" }
+#anna-api = { git = "https://github.com/essa-project/anna-rs.git" }
+anna-api = { path = "../anna-rs/api"}
