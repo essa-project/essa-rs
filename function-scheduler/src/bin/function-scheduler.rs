@@ -130,12 +130,25 @@ async fn call_function(
             .await
             .expect("failed to receive reply");
 
+        // TODO: this may be wrong. This is here to "fix" the problem:
+        // Attempted to reply on `essa/executor/<id>/run-function/<module>/<func>/<args>`, which does not intersect
+        // with query `essa/call/<module>/<func>/<args>`,
+        // despite query only allowing replies on matching key expressions
+        // at ../index.crates.io-6f17d22bba15001f/zenoh-0.7.0-rc/src/queryable.rs:186.',
+        // function-scheduler/src/bin/function-scheduler.rs:136:47
+        //
+        // Newer version don't accept disjoint querying disjoint keys:
+        // https://github.com/eclipse-zenoh/roadmap/discussions/55?sort=top
         let key = scheduler_function_call_topic(&zenoh_prefix, &module, &function, &args);
-        let key_expr = KeyExpr::try_from(key).expect("Cannot create a KeyExpr from {key}");
-        let sample = Sample::new(key_expr, reply.sample.expect("Error trying to get sample.value").value);
-
-        query.reply(Ok(sample)).res().await.expect("Failed to reply to executor_run_function_topic");
+        match reply.sample {
+            Err(e) => eprintln!("`{key}` reply.sample is Err. Error = {e}"),
+            Ok(value) => {
+                let sample = Sample::try_from(key, value).expect("Cannot create a `Sample`");
+                query.reply(Ok(sample)).res().await.expect("Failed to reply to executor_run_function_topic");
+            }
+        };
     };
+    // TODO: this detach may be a problem??
     smol::spawn(task).detach();
 
     Ok(())
