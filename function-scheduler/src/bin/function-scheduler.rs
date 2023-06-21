@@ -11,13 +11,11 @@ use std::sync::Arc;
 use anyhow::Context;
 use essa_common::{
     essa_default_zenoh_prefix, executor_run_function_topic, executor_run_module_topic,
-    scheduler_function_call_subscribe_topic, scheduler_run_module_topic, scheduler_function_call_topic,
+    scheduler_function_call_subscribe_topic, scheduler_function_call_topic,
+    scheduler_run_module_topic,
 };
 use futures::{select, StreamExt};
-use zenoh::{
-    prelude::r#async::*,
-    queryable::Query,
-};
+use zenoh::{prelude::r#async::*, queryable::Query};
 
 fn main() -> anyhow::Result<()> {
     smol::block_on(run())
@@ -139,12 +137,17 @@ async fn call_function(
         //
         // Newer version don't accept disjoint querying disjoint keys:
         // https://github.com/eclipse-zenoh/roadmap/discussions/55?sort=top
+        // This creates a `key` like the `query`.
         let key = scheduler_function_call_topic(&zenoh_prefix, &module, &function, &args);
         match reply.sample {
             Err(e) => eprintln!("`{key}` reply.sample is Err. Error = {e}"),
             Ok(value) => {
                 let sample = Sample::try_from(key, value).expect("Cannot create a `Sample`");
-                query.reply(Ok(sample)).res().await.expect("Failed to reply to executor_run_function_topic");
+                query
+                    .reply(Ok(sample))
+                    .res()
+                    .await
+                    .expect("Failed to reply to executor_run_function_topic");
             }
         };
     };

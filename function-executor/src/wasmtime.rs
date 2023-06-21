@@ -12,11 +12,7 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, ValType};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
-use zenoh::{
-    prelude::r#async::*,
-    queryable::Query,
-    query::Reply,
-};
+use zenoh::{prelude::r#async::*, query::Reply, queryable::Query};
 
 impl FunctionExecutor {
     /// Runs the given WASM module.
@@ -120,10 +116,14 @@ impl FunctionExecutor {
         let mut host_state = store.into_data();
         if let Some(result_value) = host_state.function_result.take() {
             let selector = query.key_expr().clone();
-            query.reply(Ok(Sample::new(selector, result_value))).res().await.map_err(|e| {
-                let err = Box::<dyn std::error::Error + 'static + Send + Sync>::from(e);
-                anyhow::anyhow!(err)
-            })?;
+            query
+                .reply(Ok(Sample::new(selector, result_value)))
+                .res()
+                .await
+                .map_err(|e| {
+                    let err = Box::<dyn std::error::Error + 'static + Send + Sync>::from(e);
+                    anyhow::anyhow!(err)
+                })?;
 
             Ok(())
         } else {
@@ -131,7 +131,6 @@ impl FunctionExecutor {
         }
     }
 }
-
 
 /// Link the host functions and WASI abstractions into the WASM module.
 fn set_up_module(
@@ -662,7 +661,7 @@ impl HostState {
                     let reply = result.recv_async().await.map_err(|e| {
                         println!("erro do recv_async: {e:?}");
                         EssaResult::UnknownError
-                    } )?;
+                    })?;
                     let value = reply
                         .sample
                         .map_err(|_e| EssaResult::UnknownError)?

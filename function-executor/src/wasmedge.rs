@@ -106,10 +106,14 @@ impl FunctionExecutor {
         // busy-wait on the result key in the KVS anymore.
         if let Some(result_value) = host_state.function_result.take() {
             let selector = query.key_expr().clone();
-            query.reply(Ok(Sample::new(selector, result_value))).res().await.map_err(|e| {
-                let err = Box::<dyn std::error::Error + 'static + Send + Sync>::from(e);
-                anyhow::anyhow!(err)
-            })?;
+            query
+                .reply(Ok(Sample::new(selector, result_value)))
+                .res()
+                .await
+                .map_err(|e| {
+                    let err = Box::<dyn std::error::Error + 'static + Send + Sync>::from(e);
+                    anyhow::anyhow!(err)
+                })?;
 
             Ok(())
         } else {

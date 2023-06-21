@@ -10,7 +10,7 @@ anyhow = "1.0.45"
 wasmtime = "9.0.3"
 wasmtime-wasi = "9.0.3"
 argh = "0.1.6"
-zenoh = {version = "0.7.0-rc", features = ["unstable"] }
+zenoh = "0.7.0-rc"
 essa-common = { path = "../common" }
 smol = "1.2.5"
 futures = "0.3.17"
