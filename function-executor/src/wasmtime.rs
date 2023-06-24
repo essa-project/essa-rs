@@ -233,6 +233,28 @@ fn set_up_module(
     linker
         .func_wrap(
             "host",
+            "essa_run_r",
+            |caller: Caller<'_, HostState>,
+             function_ptr: u32,
+             function_len: u32,
+             serialized_args_ptr: u32,
+             serialized_arg_len: u32,
+             result_handle_ptr: u32| {
+                essa_run_r_wrapper(
+                    caller,
+                    function_ptr,
+                    function_len,
+                    serialized_args_ptr,
+                    serialized_arg_len,
+                    result_handle_ptr,
+                )
+                .map(|r| r as i32)
+            },
+        )
+        .context("failed to create essa_run_r host function")?;
+    linker
+        .func_wrap(
+            "host",
             "essa_get_result_len",
             |caller: Caller<'_, HostState>, handle: u32, value_len_ptr: u32| {
                 essa_get_result_len_wrapper(caller, handle, value_len_ptr).map(|r| r as i32)
@@ -363,6 +385,58 @@ fn essa_call_wrapper(
         }
         Err(err) => Ok(err),
     }
+}
+
+/// Host function for calling the specified R function on a remote node.
+fn essa_run_r_wrapper(
+    mut caller: Caller<HostState>,
+    function_ptr: u32,
+    function_len: u32,
+    serialized_args_ptr: u32,
+    serialized_args_len: u32,
+    result_handle_ptr: u32,
+) -> anyhow::Result<EssaResult> {
+    // Use our `caller` context to get the memory export of the
+    // module which called this host function.
+    let mem = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        _ => bail!("failed to find host memory"),
+    };
+    // read the function name from the WASM sandbox
+    let function = {
+        let mut data = vec![0u8; function_len as usize];
+        mem.read(&caller, function_ptr as usize, &mut data)
+            .context("function ptr/len out of bounds")?;
+        String::from_utf8(data).context("function name not valid utf8")?
+    };
+    // read the serialized function arguments from the WASM sandbox
+    let args = {
+        let mut data = vec![0u8; serialized_args_len as usize];
+        mem.read(&caller, serialized_args_ptr as usize, &mut data)
+            .context("function args ptr/len out of bounds")?;
+        data
+    };
+
+    match caller.data_mut().essa_run_r(function, args) {
+        Ok(result) => {
+            let host_state = caller.data_mut();
+            let handle = host_state.next_result_handle;
+            host_state.next_result_handle += 1;
+            host_state.result_receivers.insert(handle, result);
+
+            // write handle
+            mem.write(
+                &mut caller,
+                result_handle_ptr as usize,
+                &handle.to_le_bytes(),
+            )
+            .context("result_handle_ptr out of bounds")?;
+
+            Ok(EssaResult::Ok)
+        }
+        Err(err) => Ok(err)
+    }
+
 }
 
 fn essa_get_result_len_wrapper(
@@ -636,6 +710,42 @@ impl HostState {
         Ok(reply)
     }
 
+    /// Calls the given function on a node and returns the reply receiver for
+    /// the corresponding result.
+    fn essa_run_r(
+        &mut self,
+        func: String,
+        args: Vec<u8>,
+    ) -> Result<flume::Receiver<Reply>, EssaResult> {
+        let func_key: ClientKey = Uuid::new_v4().to_string().into();
+        kvs_put(
+            func_key.clone(),
+            LastWriterWinsLattice::new_now(func.as_bytes().into()).into(),
+            &mut self.anna,
+        )
+        .map_err(|_| EssaResult::UnknownError)?;
+
+        // store args in kvs
+        let args_key: ClientKey = Uuid::new_v4().to_string().into();
+        kvs_put(
+            args_key.clone(),
+            LastWriterWinsLattice::new_now(args.into()).into(),
+            &mut self.anna,
+        )
+        .map_err(|_| EssaResult::UnknownError)?;
+
+        // trigger the function call on a remote node
+        let reply = smol::block_on(run_r_extern(
+            func_key,
+            args_key,
+            self.zenoh.clone(),
+            &self.zenoh_prefix,
+        ))
+        .unwrap();
+
+        Ok(reply)
+    }
+
     /// Stores the given serialized `LattiveValue` in the KVS.
     fn put_lattice(&mut self, key: &ClientKey, value: &[u8]) -> Result<(), EssaResult> {
         let value = bincode::deserialize(value).map_err(|_| EssaResult::UnknownError)?;
@@ -659,7 +769,7 @@ impl HostState {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 if let Some(result) = self.result_receivers.remove(&handle) {
                     let reply = result.recv_async().await.map_err(|e| {
-                        println!("erro do recv_async: {e:?}");
+                        log::debug!("Error get_result, recv_async: {e:?}");
                         EssaResult::UnknownError
                     })?;
                     let value = reply
@@ -692,6 +802,26 @@ async fn call_function_extern(
     zenoh_prefix: &str,
 ) -> anyhow::Result<flume::Receiver<Reply>> {
     let topic = scheduler_function_call_topic(zenoh_prefix, &module_key, &function_name, &args_key);
+
+    // send the request to the scheduler node
+    let reply = zenoh
+        .get(topic)
+        .res()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("failed to send function call request to scheduler")?;
+
+    Ok(reply)
+}
+
+/// Call the specfied function on a remote node.
+async fn run_r_extern(
+    func_key: ClientKey,
+    args_key: ClientKey,
+    zenoh: Arc<zenoh::Session>,
+    zenoh_prefix: &str,
+) -> anyhow::Result<flume::Receiver<Reply>> {
+    let topic = format!("essa/{func_key}/run_r/{args_key}"); //scheduler_function_call_topic(zenoh_prefix, &module_key, &function_name, &args_key);
 
     // send the request to the scheduler node
     let reply = zenoh

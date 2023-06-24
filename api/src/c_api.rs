@@ -202,3 +202,15 @@ extern "C" {
         value_len_ptr: *mut usize,
     ) -> i32;
 }
+// R related functionality
+#[link(wasm_import_module = "host")]
+extern "C" {
+    /// Run a remote R function.
+    pub fn essa_run_r(
+        function_name_ptr: *const u8,
+        function_name_len: usize,
+        args_ptr: *const u8,
+        args_len: usize,
+        result_handle: *mut usize,
+    ) -> i32;
+}

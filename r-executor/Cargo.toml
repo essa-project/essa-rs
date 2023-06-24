@@ -1,0 +1,25 @@
+[package]
+name = "r-executor"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anna = { path = "../anna-rs" }
+essa-common = {path = "../common"}
+essa-api = { path = "../api" }
+argh = "0.1.6"
+zenoh = "0.7.0-rc"
+extendr-api = {version = "0.4", features = ["serde"]}
+extendr-engine = "0.4"
+anyhow = "1.0.45"
+fern = "0.6.0"
+log = "0.4.14"
+smol = "1.2.5"
+uuid = {version = "0.8.2", features = ["v4"]}
+tokio = { version = "1.28", features = ["rt-multi-thread", "macros"] }
+flume = "0.10"
+eyre = "0.6.5"
+serde = {version = "1.0", features = ["derive"]}
+serde_json = "1.0"

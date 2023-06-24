@@ -6,5 +6,6 @@ members = [
     "function-executor",
     "function-scheduler",
     "test-function",
+    "r-executor",
 ]
 exclude = ["anna-rs"]

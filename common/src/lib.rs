@@ -3,6 +3,24 @@
 
 #![warn(missing_docs)]
 
+/// R-Arguments representation.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Rargs {
+    // In the future this should not be retricted to Vec<f64>.
+    // XXX: should be &str instead of String??
+    /// Vector with labels and Vec<f64>.
+    pub args: Option<Vec<(String, Vec<f64>)>>,
+}
+
+/// R-Return representation.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Rreturn {
+    // In the future this should not be retricted to Vec<f64>.
+    // XXX: should be &str instead of String??
+    /// Vector with labels and Vec<f64>.
+    pub result: Option<Vec<f64>>,
+}
+
 /// The default topic prefix for zenoh, used by all essa code.
 pub fn essa_default_zenoh_prefix() -> &'static str {
     "essa"
