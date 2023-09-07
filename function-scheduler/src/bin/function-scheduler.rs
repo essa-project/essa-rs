@@ -15,7 +15,7 @@ use essa_common::{
 };
 use futures::{select, StreamExt};
 use zenoh::{
-    prelude::{Receiver, SplitBuffer, ZFuture},
+    prelude::{r#async::AsyncResolve, SplitBuffer},
     queryable::Query,
 };
 
@@ -25,7 +25,8 @@ fn main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     let zenoh = zenoh::open(zenoh::config::Config::default())
-        .wait()
+        .res()
+        .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to connect to zenoh")?
         .into_arc();
@@ -33,19 +34,21 @@ async fn run() -> anyhow::Result<()> {
 
     // subscribe to module run requests issued through `run-function`
     let mut new_modules_sub = zenoh
-        .subscribe(scheduler_run_module_topic(zenoh_prefix))
+        .declare_subscriber(scheduler_run_module_topic(zenoh_prefix))
+        .res()
         .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to subscribe to new modules")?;
-    let mut new_modules = new_modules_sub.receiver().fuse();
+    let mut new_modules = new_modules_sub.receiver.into_stream();
 
     // subscribe to remote function call requests issued by WASM functions
     let mut function_calls_sub = zenoh
-        .queryable(scheduler_function_call_subscribe_topic(zenoh_prefix))
+        .declare_queryable(scheduler_function_call_subscribe_topic(zenoh_prefix))
+        .res()
         .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to subscribe to function calls")?;
-    let mut function_calls = function_calls_sub.receiver().fuse();
+    let mut function_calls = function_calls_sub.receiver.into_stream();
 
     loop {
         select! {
@@ -81,7 +84,8 @@ async fn run_module(
             executor_run_module_topic(executor_id, zenoh_prefix),
             wasm_bytes,
         )
-        .wait()
+        .res()
+        .await
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to send module to executor")?;
 
@@ -97,7 +101,7 @@ async fn call_function(
     // executor node 0
     let executor_id = 0;
 
-    let mut topic_split = query.key_selector().as_str().split('/');
+    let mut topic_split = query.key_expr().as_str().split('/');
     let args = topic_split
         .next_back()
         .context("no args key in topic")?
@@ -118,13 +122,14 @@ async fn call_function(
 
         let reply = zenoh
             .get(topic)
+            .res()
             .await
             .expect("failed to forward function call to executor")
             .recv_async()
             .await
             .expect("failed to receive reply");
 
-        query.reply_async(reply.sample).await;
+        query.reply(reply.sample).res().await;
     };
     smol::spawn(task).detach();
 

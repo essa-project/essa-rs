@@ -10,20 +10,21 @@ version = "0.1.0"
 anyhow = "1.0.45"
 argh = "0.1.6"
 eyre = "0.6.5"
-wasmedge-sdk = {version = "0.8.1", optional = true}
-wasmtime = {version = "9.0.3", optional = true}
-wasmtime-wasi = {version = "9.0.3", optional = true}
+wasmedge-sdk = { version = "0.8.1", optional = true }
+wasmtime = { version = "9.0.3", optional = true }
+wasmtime-wasi = { version = "9.0.3", optional = true }
 # keep in sync with anna-rs
-anna = {git = "https://github.com/essa-project/anna-rs.git"}
+anna = { git = "https://github.com/essa-project/anna-rs.git" }
 bincode = "1.3.3"
-chrono = {version = "0.4.19", default-features = false}
-essa-common = {path = "../common"}
+chrono = { version = "0.4.19", default-features = false }
+essa-common = { path = "../common" }
 fern = "0.6.0"
 log = "0.4.14"
-serde = {version = "1.0.130", features = ["derive"]}
+serde = { version = "1.0.130", features = ["derive"] }
 smol = "1.2.5"
-uuid = {version = "0.8.2", features = ["v4"]}
-zenoh = {git = "https://github.com/eclipse-zenoh/zenoh.git", rev = "d4b00540cd0faa6ce585e11862cf9740ca226489"}
+uuid = { version = "0.8.2", features = ["v4"] }
+zenoh = "0.7.0-rc"
+flume = "0.10.14"
 
 [features]
 default = ["wasmedge_executor"]
