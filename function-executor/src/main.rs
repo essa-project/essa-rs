@@ -19,13 +19,14 @@ use anyhow::Context;
 use essa_common::{
     essa_default_zenoh_prefix, executor_run_function_subscribe_topic, executor_run_module_topic,
 };
+use flume::RecvError;
 use std::{
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
-use zenoh::prelude::{Receiver, SplitBuffer, ZFuture};
+use zenoh::prelude::{sync::SyncResolve, SplitBuffer};
 
 #[cfg(all(feature = "wasmedge_executor", feature = "wasmtime_executor"))]
 compile_error!(
@@ -61,7 +62,7 @@ fn main() -> anyhow::Result<()> {
 
     let zenoh = Arc::new(
         zenoh::open(zenoh::config::Config::default())
-            .wait()
+            .res()
             .map_err(|e| anyhow::anyhow!(e))
             .context("failed to connect to zenoh")?,
     );
@@ -130,13 +131,13 @@ fn module_receive_loop(
     zenoh_prefix: String,
 ) -> anyhow::Result<()> {
     let mut new_modules = zenoh
-        .subscribe(executor_run_module_topic(args.id, &zenoh_prefix))
-        .wait()
+        .declare_subscriber(executor_run_module_topic(args.id, &zenoh_prefix))
+        .res()
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to subscribe to new modules")?;
 
     loop {
-        match new_modules.receiver().recv() {
+        match new_modules.receiver.recv() {
             Ok(change) => {
                 let wasm_bytes = change.value.payload.contiguous().into_owned();
 
@@ -158,7 +159,7 @@ fn module_receive_loop(
                     log::info!("Module run finished in {:?}", Instant::now() - start);
                 });
             }
-            Err(zenoh::sync::channel::RecvError::Disconnected) => break,
+            Err(RecvError::Disconnected) => break,
         }
     }
     Ok(())
@@ -171,16 +172,16 @@ fn function_call_receive_loop(
     zenoh_prefix: String,
 ) -> anyhow::Result<()> {
     let mut function_calls = zenoh
-        .queryable(executor_run_function_subscribe_topic(
+        .declare_queryable(executor_run_function_subscribe_topic(
             args.id,
             &zenoh_prefix,
         ))
-        .wait()
+        .res()
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to subscribe to new modules")?;
 
     loop {
-        match function_calls.receiver().recv() {
+        match function_calls.receiver.recv() {
             Ok(query) => {
                 // start a new function executor instance to run the requested
                 // function
@@ -198,7 +199,7 @@ fn function_call_receive_loop(
                     }
                 });
             }
-            Err(zenoh::sync::channel::RecvError::Disconnected) => break,
+            Err(RecvError::Disconnected) => break,
         }
     }
     Ok(())

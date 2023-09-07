@@ -6,13 +6,14 @@ use crate::{get_args, get_module, kvs_get, kvs_put, EssaResult, FunctionExecutor
 use anna::{lattice::LastWriterWinsLattice, nodes::ClientNode, ClientKey};
 use anyhow::{bail, Context};
 use essa_common::scheduler_function_call_topic;
+use flume::Receiver;
 use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, ValType};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 use zenoh::{
-    prelude::{Receiver, Sample, SplitBuffer, ZFuture},
-    query::ReplyReceiver,
+    prelude::{sync::SyncResolve, Sample, SplitBuffer},
+    query::Reply,
     queryable::Query,
 };
 
@@ -70,7 +71,7 @@ impl FunctionExecutor {
 
     /// Runs the given function of a already compiled WASM module.
     pub fn handle_function_call(mut self, query: Query) -> anyhow::Result<()> {
-        let mut topic_split = query.key_selector().as_str().split('/');
+        let mut topic_split = query.key_expr().as_str().split('/');
         let args_key = ClientKey::from(topic_split.next_back().context("no args key in topic")?);
         let function_name = topic_split
             .next_back()
@@ -117,8 +118,11 @@ impl FunctionExecutor {
         // busy-wait on the result key in the KVS anymore.
         let mut host_state = store.into_data();
         if let Some(result_value) = host_state.function_result.take() {
-            let selector = query.key_selector().to_string();
-            query.reply(Sample::new(selector, result_value));
+            let selector = query.key_expr().clone();
+            query
+                .reply(Ok(Sample::new(selector, result_value)))
+                .res()
+                .map_err(|err| anyhow::anyhow!(err))?;
 
             Ok(())
         } else {
@@ -580,7 +584,7 @@ struct HostState {
     function_result: Option<Vec<u8>>,
 
     next_result_handle: u32,
-    result_receivers: HashMap<u32, ReplyReceiver>,
+    result_receivers: HashMap<u32, Receiver<Reply>>,
     results: HashMap<u32, Arc<Vec<u8>>>,
 
     zenoh: Arc<zenoh::Session>,
@@ -595,7 +599,7 @@ impl HostState {
         &mut self,
         function_name: String,
         args: Vec<u8>,
-    ) -> Result<ReplyReceiver, EssaResult> {
+    ) -> Result<Receiver<Reply>, EssaResult> {
         // get the requested function and check its signature
         let func = self
             .module
@@ -653,7 +657,13 @@ impl HostState {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 if let Some(result) = self.result_receivers.remove(&handle) {
                     let reply = result.recv().map_err(|_| EssaResult::UnknownError)?;
-                    let value = reply.sample.value.payload.contiguous().into_owned();
+                    let value = reply
+                        .sample
+                        .map_err(|_| EssaResult::UnknownError)?
+                        .value
+                        .payload
+                        .contiguous()
+                        .into_owned();
                     let value = entry.insert(Arc::new(value));
                     Ok(value.clone())
                 } else {
@@ -675,13 +685,13 @@ fn call_function_extern(
     args_key: ClientKey,
     zenoh: Arc<zenoh::Session>,
     zenoh_prefix: &str,
-) -> anyhow::Result<ReplyReceiver> {
+) -> anyhow::Result<Receiver<Reply>> {
     let topic = scheduler_function_call_topic(zenoh_prefix, &module_key, &function_name, &args_key);
 
     // send the request to the scheduler node
     let reply = zenoh
         .get(topic)
-        .wait()
+        .res()
         .map_err(|e| anyhow::anyhow!(e))
         .context("failed to send function call request to scheduler")?;
 
